@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Semantic color tokens ───────────────────────────────────────────────────
+   All values are space-separated RGB channels so Tailwind's opacity modifier
+   (bg-t-bg/50) works: rgb(var(--t-bg) / 0.5)
+   ─────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── Light theme ── */
+  --t-bg:       244 244 245;   /* page background     zinc-100  */
+  --t-panel:    255 255 255;   /* header / sidebar    white     */
+  --t-card:     249 250 251;   /* cards               gray-50   */
+  --t-field:    255 255 255;   /* inputs              white     */
+  --t-hover:    243 244 246;   /* hover highlight     gray-100  */
+  --t-active:   229 231 235;   /* active / pressed    gray-200  */
+
+  --t-line:     228 228 231;   /* default border      zinc-200  */
+  --t-line2:    212 212 216;   /* stronger border     zinc-300  */
+
+  --t-ink:       24  24  27;   /* primary text        zinc-900  */
+  --t-ink2:      82  82  91;   /* secondary           zinc-600  */
+  --t-ink3:     113 113 122;   /* muted               zinc-500  */
+  --t-ink4:     161 161 170;   /* subtle              zinc-400  */
+  --t-ink5:     212 212 216;   /* ghost               zinc-300  */
+}
+
+.dark {
+  /* ── Dark theme ── */
+  --t-bg:        10  10  10;   /* page background     #0a0a0a   */
+  --t-panel:     17  17  17;   /* header / sidebar    #111111   */
+  --t-card:      24  24  27;   /* cards               zinc-900  */
+  --t-field:     24  24  27;   /* inputs              zinc-900  */
+  --t-hover:     39  39  42;   /* hover highlight     zinc-800  */
+  --t-active:    63  63  70;   /* active / pressed    zinc-700  */
+
+  --t-line:      39  39  42;   /* default border      zinc-800  */
+  --t-line2:     63  63  70;   /* stronger border     zinc-700  */
+
+  --t-ink:      244 244 245;   /* primary text        zinc-100  */
+  --t-ink2:     212 212 216;   /* secondary           zinc-300  */
+  --t-ink3:     161 161 170;   /* muted               zinc-400  */
+  --t-ink4:     113 113 122;   /* subtle              zinc-500  */
+  --t-ink5:      82  82  91;   /* ghost               zinc-600  */
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background-color: rgb(var(--t-bg));
+  color: rgb(var(--t-ink));
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────────  */
+
+::-webkit-scrollbar          { width: 6px; height: 6px; }
+::-webkit-scrollbar-track    { background: transparent; }
+::-webkit-scrollbar-thumb    { background: rgb(var(--t-line2)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--t-ink4)); }
+
+/* ── Utilities ──────────────────────────────────────────────────────────────  */
+
+.log-selectable { user-select: text; }
