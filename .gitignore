@@ -1,33 +1,52 @@
-# Dependencies
+# ── Dependencies ─────────────────────────────────────────
 node_modules/
 
-# Build output
+# ── Build output ─────────────────────────────────────────
 dist/
 dist-ssr/
 
-# Tauri
+# ── Tauri (Rust + native bundles) ────────────────────────
 src-tauri/target/
 src-tauri/WixTools/
 src-tauri/gen/
 
-# Env
+# ── Env / secrets ────────────────────────────────────────
 .env
 .env.local
 .env.*.local
 
-# Editor
+# ── Editor / IDE ─────────────────────────────────────────
 .vscode/*
 !.vscode/extensions.json
 .idea/
-.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
-# Logs
+# ── OS junk ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ── Logs / temp ──────────────────────────────────────────
 *.log
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+*.bak
+*.tmp
+.tmp/
+
+# ── Tauri standalone build artifacts (release-bundle/) ───
+*.dmg
+*.msi
+*.exe.zst
+*.deb
+*.rpm
+*.AppImage
+
+# ── Local user data (just in case it gets symlinked) ─────
+.amqpush/

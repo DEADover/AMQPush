@@ -7,11 +7,30 @@ pub struct Profile {
     pub name: String,
     pub host: String,
     pub port: u16,
+    #[serde(default)]
     pub username: String,
+    #[serde(default)]
     pub password: String,
+    #[serde(default)]
     pub queue: String,
+    #[serde(default)]
     pub use_tls: bool,
+
+    // Advanced options — added later, default to "off"/"auto" so old
+    // profiles without these keys keep loading.
+    #[serde(default)]
+    pub container_id: String,            // empty = autogenerate
+    #[serde(default)]
+    pub heartbeat_secs: u32,             // 0 = no idle-timeout
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u32,       // 0 = no timeout (block until connected)
+    #[serde(default)]
+    pub tls_skip_verify: bool,           // self-signed certs (insecure)
+    #[serde(default)]
+    pub sasl_anonymous: bool,            // force ANONYMOUS even with creds in form
 }
+
+fn default_connect_timeout() -> u32 { 10 }
 
 impl Default for Profile {
     fn default() -> Self {
@@ -21,8 +40,13 @@ impl Default for Profile {
             port: 61616,
             username: String::new(),
             password: String::new(),
-            queue: "test_queue".into(),
+            queue: String::new(),
             use_tls: false,
+            container_id: String::new(),
+            heartbeat_secs: 0,
+            connect_timeout_secs: 10,
+            tls_skip_verify: false,
+            sasl_anonymous: false,
         }
     }
 }

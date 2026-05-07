@@ -1,6 +1,4 @@
 use chrono::Local;
-use fe2o3_amqp::connection::ConnectionHandle;
-use fe2o3_amqp::session::SessionHandle;
 use fe2o3_amqp::{Connection, Receiver, Session};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -24,20 +22,21 @@ impl SubscriberHandle {
     }
 }
 
-pub async fn start(
-    host: &str,
+struct SubParams {
+    host: String,
     port: u16,
     address: String,
-    username: &str,
-    password: &str,
+    username: String,
+    password: String,
     use_tls: bool,
-    app: AppHandle,
-) -> Result<SubscriberHandle, String> {
-    let scheme = if use_tls { "amqps" } else { "amqp" };
-    let url = if !username.is_empty() {
-        format!("{scheme}://{username}:{password}@{host}:{port}")
+}
+
+async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connection::ConnectionHandle<()>, fe2o3_amqp::session::SessionHandle<()>), String> {
+    let scheme = if p.use_tls { "amqps" } else { "amqp" };
+    let url = if !p.username.is_empty() {
+        format!("{scheme}://{}:{}@{}:{}", p.username, p.password, p.host, p.port)
     } else {
-        format!("{scheme}://{host}:{port}")
+        format!("{scheme}://{}:{}", p.host, p.port)
     };
 
     let mut connection = Connection::open("amqpush-sub", &*url)
@@ -48,11 +47,35 @@ pub async fn start(
         .await
         .map_err(|e| format!("Subscriber session failed: {e}"))?;
 
-    let receiver = Receiver::attach(&mut session, "amqpush-recv", &address)
+    let receiver = Receiver::attach(&mut session, "amqpush-recv", &p.address)
         .await
         .map_err(|e| format!("Subscriber link failed: {e}"))?;
 
-    let task = tokio::spawn(run_loop(receiver, connection, session, app));
+    Ok((receiver, connection, session))
+}
+
+pub async fn start(
+    host: &str,
+    port: u16,
+    address: String,
+    username: &str,
+    password: &str,
+    use_tls: bool,
+    app: AppHandle,
+) -> Result<SubscriberHandle, String> {
+    let params = SubParams {
+        host: host.to_string(),
+        port,
+        address,
+        username: username.to_string(),
+        password: password.to_string(),
+        use_tls,
+    };
+
+    // Initial connection attempt (fail fast, surface error to UI)
+    let (receiver, connection, session) = open_connection(&params).await?;
+
+    let task = tokio::spawn(run_loop(receiver, connection, session, params, app));
 
     Ok(SubscriberHandle {
         abort: task.abort_handle(),
@@ -61,15 +84,20 @@ pub async fn start(
 
 async fn run_loop(
     mut receiver: Receiver,
-    mut connection: ConnectionHandle<()>,
-    mut session: SessionHandle<()>,
+    mut connection: fe2o3_amqp::connection::ConnectionHandle<()>,
+    mut session: fe2o3_amqp::session::SessionHandle<()>,
+    params: SubParams,
     app: AppHandle,
 ) {
     const MAX_BODY_LEN: usize = 4096;
+    const MAX_BACKOFF_MS: u64 = 30_000;
+    let mut backoff_ms: u64 = 1_000;
 
     loop {
         match receiver.recv::<String>().await {
             Ok(delivery) => {
+                backoff_ms = 1_000; // reset on successful receive
+
                 let raw = delivery.body().clone();
                 let is_truncated = raw.len() > MAX_BODY_LEN;
                 let body = if is_truncated {
@@ -90,16 +118,32 @@ async fn run_loop(
                 )
                 .ok();
             }
-            Err(e) => {
-                app.emit("subscriber_error", e.to_string()).ok();
-                break;
+            Err(_) => {
+                // Best-effort cleanup of old connection
+                let _ = receiver.detach().await;
+                let _ = session.end().await;
+                let _ = connection.close().await;
+
+                // Notify UI: reconnecting
+                app.emit("subscriber_reconnecting", backoff_ms).ok();
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+
+                // Try to reconnect
+                match open_connection(&params).await {
+                    Ok((r, c, s)) => {
+                        receiver = r;
+                        connection = c;
+                        session = s;
+                        app.emit("subscriber_reconnected", ()).ok();
+                    }
+                    Err(e) => {
+                        app.emit("subscriber_error", e).ok();
+                        app.emit("subscriber_stopped", ()).ok();
+                        return;
+                    }
+                }
             }
         }
     }
-
-    // best-effort cleanup (may not run if task is aborted)
-    let _ = receiver.detach().await;
-    let _ = session.end().await;
-    let _ = connection.close().await;
-    app.emit("subscriber_stopped", ()).ok();
 }

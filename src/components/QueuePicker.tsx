@@ -1,37 +1,72 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, Bookmark, BookmarkCheck, X } from "lucide-react";
-import { SavedQueue } from "../types";
+import { ChevronDown, RotateCcw, Radar, X, AlertCircle, Check } from "lucide-react";
+
+interface BrokerQueue {
+  name: string;
+  address: string;
+  message_count: number;
+  consumer_count: number;
+  routing_type: string;
+  kind: string; // "queue" | "address"
+}
 
 interface Props {
   value: string;
   onChange: (v: string) => void;
+  connected?: boolean;
   disabled?: boolean;
   placeholder?: string;
-  showSave?: boolean;
   className?: string;
+  /** @deprecated — bookmarks were removed; prop kept for backward compatibility */
+  showSave?: boolean;
+  /** @deprecated — kept for backward compatibility */
   onQueuesChange?: () => void;
 }
 
 export default function QueuePicker({
-  value, onChange, disabled, placeholder = "queue or address",
-  showSave = true, className = "", onQueuesChange,
+  value, onChange, connected = false, disabled,
+  placeholder = "queue or address",
+  className = "",
 }: Props) {
-  const [queues,     setQueues]     = useState<SavedQueue[]>([]);
-  const [open,       setOpen]       = useState(false);
-  const [saving,     setSaving]     = useState(false);
-  const [savedNames, setSavedNames] = useState<Set<string>>(new Set());
+  const [brokerQueues,   setBrokerQueues]   = useState<BrokerQueue[]>([]);
+  const [open,           setOpen]           = useState(false);
+  const [brokerLoading,  setBrokerLoading]  = useState(false);
+  const [brokerErr,      setBrokerErr]      = useState<string | null>(null);
+  const [brokerLoadedAt, setBrokerLoadedAt] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  async function load() {
+  async function loadBroker(silent = false) {
+    if (!connected) return;
+    if (!silent) setBrokerLoading(true);
+    setBrokerErr(null);
     try {
-      const list = await invoke<SavedQueue[]>("get_saved_queues");
-      setQueues(list);
-      setSavedNames(new Set(list.map(q => q.name)));
-    } catch {}
+      const list = await invoke<BrokerQueue[]>("list_broker_queues");
+      setBrokerQueues(list);
+      setBrokerLoadedAt(Date.now());
+    } catch (e) {
+      setBrokerErr(String(e));
+    } finally {
+      setBrokerLoading(false);
+    }
   }
 
-  useEffect(() => { load(); }, []);
+  // Auto-load broker queues when dropdown first opens (and connected)
+  useEffect(() => {
+    if (open && connected && brokerLoadedAt === null && !brokerLoading) {
+      loadBroker();
+    }
+  }, [open, connected]);
+
+  // Re-fetch broker queues when reconnecting
+  useEffect(() => {
+    if (!connected) {
+      setBrokerQueues([]);
+      setBrokerErr(null);
+      setBrokerLoadedAt(null);
+    }
+  }, [connected]);
+
   useEffect(() => {
     function handle(e: MouseEvent) {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
@@ -40,26 +75,15 @@ export default function QueuePicker({
     return () => document.removeEventListener("mousedown", handle);
   }, []);
 
-  const filtered = value.trim()
-    ? queues.filter(q => q.name.toLowerCase().includes(value.toLowerCase()) || q.label.toLowerCase().includes(value.toLowerCase()))
-    : queues;
+  const q = value.trim().toLowerCase();
+  const filtered = useMemo(
+    () => q
+      ? brokerQueues.filter(it => it.address.toLowerCase().includes(q) || it.name.toLowerCase().includes(q))
+      : brokerQueues,
+    [brokerQueues, q]
+  );
 
-  async function toggleSave() {
-    if (!value.trim()) return;
-    setSaving(true);
-    try {
-      if (savedNames.has(value.trim())) {
-        await invoke("delete_queue", { name: value.trim() });
-      } else {
-        await invoke("save_queue", { queue: { name: value.trim(), label: "", notes: "" } });
-      }
-      await load();
-      onQueuesChange?.();
-    } catch {}
-    setSaving(false);
-  }
-
-  const isSaved = savedNames.has(value.trim());
+  const showLiveBadge = connected && brokerLoadedAt !== null;
 
   return (
     <div ref={containerRef} className={`relative flex items-center gap-1 ${className}`}>
@@ -70,9 +94,20 @@ export default function QueuePicker({
           onFocus={() => setOpen(true)}
           placeholder={placeholder}
           disabled={disabled}
-          className="w-full bg-t-field border border-t-line2 rounded-md pl-3 pr-8 py-2 text-sm text-t-ink font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5 disabled:opacity-50"
+          className="w-full bg-t-field border border-t-line2 rounded-md pl-3 pr-14 py-2 text-sm text-t-ink font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5 disabled:opacity-50"
         />
-        {!disabled && queues.length > 0 && (
+        {!disabled && value && (
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={() => { onChange(""); setOpen(true); }}
+            title="Clear"
+            className="absolute right-7 top-1/2 -translate-y-1/2 text-t-ink5 hover:text-t-ink2 transition-colors"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
+        {!disabled && (
           <button
             type="button"
             tabIndex={-1}
@@ -84,40 +119,116 @@ export default function QueuePicker({
         )}
       </div>
 
-      {showSave && value.trim() && !disabled && (
-        <button
-          type="button"
-          onClick={toggleSave}
-          disabled={saving}
-          title={isSaved ? "Remove from saved queues" : "Save to queue list"}
-          className={`shrink-0 p-2 rounded-md border transition-all ${
-            isSaved
-              ? "bg-blue-500/10 border-blue-500/30 text-blue-500 hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-500"
-              : "bg-t-field border-t-line2 text-t-ink4 hover:text-t-ink hover:border-t-line2"
-          }`}
-        >
-          {isSaved ? <BookmarkCheck className="w-3.5 h-3.5" /> : <Bookmark className="w-3.5 h-3.5" />}
-        </button>
-      )}
-
-      {open && !disabled && filtered.length > 0 && (
+      {/* DROPDOWN */}
+      {open && !disabled && (
         <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-t-card border border-t-line rounded-lg shadow-xl overflow-hidden">
-          <div className="max-h-52 overflow-y-auto">
-            {filtered.map(q => (
-              <button
-                key={q.name}
-                type="button"
-                onClick={() => { onChange(q.name); setOpen(false); }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-t-hover transition-colors ${value === q.name ? "bg-t-hover" : ""}`}
-              >
-                <div className="flex-1 min-w-0">
-                  <span className="block text-sm text-t-ink font-mono truncate">{q.name}</span>
-                  {q.label && <span className="block text-xs text-t-ink4 truncate">{q.label}</span>}
-                </div>
-                {value === q.name && <X className="w-3 h-3 text-t-ink5 shrink-0" />}
-              </button>
-            ))}
+
+          {/* Top bar — status + refresh */}
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel">
+            <Radar className="w-3 h-3 text-t-ink4 shrink-0" />
+            <span className="text-[10px] uppercase tracking-wider text-t-ink4 font-semibold">
+              {connected ? "Broker queues" : "Not connected"}
+            </span>
+            {showLiveBadge && (
+              <span className="text-[10px] text-t-ink5 font-mono">{brokerQueues.length}</span>
+            )}
+            <button
+              type="button"
+              onClick={() => loadBroker()}
+              disabled={!connected || brokerLoading}
+              className="ml-auto p-1 text-t-ink4 hover:text-blue-500 transition-colors disabled:opacity-40"
+              title={connected ? "Refresh queue list" : "Connect to a broker first"}
+            >
+              <RotateCcw className={`w-3 h-3 ${brokerLoading ? "animate-spin" : ""}`} />
+            </button>
           </div>
+
+          {/* Broker error */}
+          {brokerErr && (
+            <div className="px-3 py-2 text-[11px] text-amber-500 bg-amber-500/5 border-b border-amber-500/20 flex items-start gap-2">
+              <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
+              <span className="break-all">{brokerErr}</span>
+            </div>
+          )}
+
+          {/* Table header — visible when there are entries */}
+          {filtered.length > 0 && (
+            <div className="grid grid-cols-[1fr_50px_50px_50px_18px] items-center gap-2 px-3 py-1 border-b border-t-line bg-t-panel/60 text-[10px] uppercase tracking-wider text-t-ink5 font-semibold">
+              <div>Name</div>
+              <div className="text-center">Type</div>
+              <div className="text-right">Msgs</div>
+              <div className="text-right">Cons</div>
+              <div></div>
+            </div>
+          )}
+
+          {/* List */}
+          <div className="max-h-72 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <p className="px-3 py-3 text-[11px] text-t-ink5 text-center">
+                {q ? "No matches" : connected ? "No queues on broker" : "Connect to a broker to discover queues"}
+              </p>
+            ) : (
+              filtered.map(it => {
+                const isCurrent = value === it.address;
+                const isAddress = it.kind === "address";
+                return (
+                  <div key={it.address}
+                    className={`grid grid-cols-[1fr_50px_50px_50px_18px] items-center gap-2 px-3 py-1.5 border-b border-t-line/40 transition-colors cursor-pointer ${
+                      isCurrent ? "bg-blue-500/10" : "hover:bg-t-hover/60"
+                    }`}
+                    onClick={() => { onChange(it.address); setOpen(false); }}
+                  >
+                    {/* Name */}
+                    <span className="text-[12px] font-mono text-t-ink truncate" title={it.address}>
+                      {it.address}
+                    </span>
+
+                    {/* Type */}
+                    <span className="text-[10px] flex justify-center">
+                      <span className={`px-1 py-0 rounded font-medium ${
+                        isAddress
+                          ? "bg-t-hover text-t-ink4"
+                          : it.routing_type === "ANYCAST"
+                            ? "bg-blue-500/15 text-blue-500"
+                            : "bg-violet-500/15 text-violet-500"
+                      }`}>
+                        {isAddress ? "ADDR" : it.routing_type === "ANYCAST" ? "ANY" : "MULTI"}
+                      </span>
+                    </span>
+
+                    {/* Messages */}
+                    <span className={`text-[11px] font-mono text-right tabular-nums ${
+                      isAddress ? "text-t-ink5" :
+                      it.message_count > 0 ? "text-t-ink2" : "text-t-ink5"
+                    }`}>
+                      {isAddress ? "—" : it.message_count}
+                    </span>
+
+                    {/* Consumers */}
+                    <span className={`text-[11px] font-mono text-right tabular-nums ${
+                      isAddress ? "text-t-ink5" :
+                      it.consumer_count > 0 ? "text-green-500" : "text-t-ink5"
+                    }`}>
+                      {isAddress ? "—" : it.consumer_count}
+                    </span>
+
+                    {/* Selected check */}
+                    <span className="flex justify-center">
+                      {isCurrent && <Check className="w-3 h-3 text-blue-500" />}
+                    </span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Footer hint for custom address */}
+          {value.trim() && !brokerQueues.some(it => it.address === value.trim()) && (
+            <div className="px-3 py-1.5 border-t border-t-line text-[10px] text-t-ink5 bg-t-panel">
+              Press <kbd className="px-1 bg-t-card border border-t-line rounded text-[9px]">Enter</kbd> to use <span className="font-mono text-t-ink3">{value.trim()}</span> (custom address)
+            </div>
+          )}
         </div>
       )}
     </div>

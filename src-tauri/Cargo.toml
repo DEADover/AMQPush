@@ -1,8 +1,8 @@
 [package]
-name = "tauri-app"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+name = "amqpush"
+version = "1.0.0"
+description = "AMQPush — AMQP 1.0 desktop client"
+authors = ["sgryzhin"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,8 +11,14 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_app_lib"
+name = "amqpush_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Explicit binary target so the executable file (and macOS Dock label in dev) is "AMQPush"
+# instead of the lowercase package name "amqpush".
+[[bin]]
+name = "AMQPush"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -20,6 +26,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.52.2", features = ["full"] }

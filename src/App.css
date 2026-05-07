@@ -8,22 +8,22 @@
    ─────────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* ── Light theme ── */
-  --t-bg:       244 244 245;   /* page background     zinc-100  */
-  --t-panel:    255 255 255;   /* header / sidebar    white     */
-  --t-card:     249 250 251;   /* cards               gray-50   */
-  --t-field:    255 255 255;   /* inputs              white     */
-  --t-hover:    243 244 246;   /* hover highlight     gray-100  */
-  --t-active:   229 231 235;   /* active / pressed    gray-200  */
+  /* ── Light theme — Postman-inspired, soft and airy ── */
+  --t-bg:       250 250 250;   /* page background     near-white #fafafa */
+  --t-panel:    255 255 255;   /* header / toolbars   white            */
+  --t-card:     247 247 248;   /* cards / sub-panels  very light gray  */
+  --t-field:    255 255 255;   /* inputs              white            */
+  --t-hover:    245 245 245;   /* hover highlight     subtle gray      */
+  --t-active:   232 232 234;   /* active / pressed    light gray-200   */
 
-  --t-line:     228 228 231;   /* default border      zinc-200  */
-  --t-line2:    212 212 216;   /* stronger border     zinc-300  */
+  --t-line:     232 232 234;   /* default border      barely visible   */
+  --t-line2:    220 220 224;   /* stronger border     soft             */
 
-  --t-ink:       24  24  27;   /* primary text        zinc-900  */
-  --t-ink2:      82  82  91;   /* secondary           zinc-600  */
-  --t-ink3:     113 113 122;   /* muted               zinc-500  */
-  --t-ink4:     161 161 170;   /* subtle              zinc-400  */
-  --t-ink5:     212 212 216;   /* ghost               zinc-300  */
+  --t-ink:       30  30  35;   /* primary text        near-black       */
+  --t-ink2:      82  82  91;   /* secondary           zinc-600         */
+  --t-ink3:     115 115 124;   /* muted               zinc-500         */
+  --t-ink4:     156 156 165;   /* subtle              zinc-400+        */
+  --t-ink5:     200 200 206;   /* ghost               zinc-300+        */
 }
 
 .dark {
@@ -53,9 +53,11 @@ body {
   margin: 0;
   background-color: rgb(var(--t-bg));
   color: rgb(var(--t-ink));
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   user-select: none;
 }
 
@@ -69,3 +71,41 @@ body {
 /* ── Utilities ──────────────────────────────────────────────────────────────  */
 
 .log-selectable { user-select: text; }
+
+/* ── CodeMirror integration — Postman-style flush look ──────────────────── */
+
+.code-editor-wrap .cm-editor {
+  background: rgb(var(--t-field));
+  color: rgb(var(--t-ink));
+  height: 100%;
+}
+
+.code-editor-wrap .cm-editor.cm-focused {
+  outline: none;
+}
+
+.code-editor-wrap .cm-editor .cm-scroller {
+  background: rgb(var(--t-field));
+}
+
+/* Syntax token colors — readable on both themes */
+.cm-keyword    { color: #60a5fa; }  /* blue-400   */
+.cm-string     { color: #86efac; }  /* green-300  */
+.cm-number     { color: #fbbf24; }  /* amber-400  */
+.cm-bool       { color: #f472b6; }  /* pink-400   */
+.cm-null       { color: #94a3b8; }  /* slate-400  */
+.cm-propertyName { color: #c4b5fd; } /* violet-300 */
+.cm-punctuation { color: rgb(var(--t-ink3)); }
+.cm-angleBracket, .cm-tagName, .cm-attributeName { color: #60a5fa; }
+.cm-attributeValue { color: #86efac; }
+
+/* Light theme overrides */
+:root .code-editor-wrap .cm-keyword     { color: #2563eb; }
+:root .code-editor-wrap .cm-string      { color: #16a34a; }
+:root .code-editor-wrap .cm-number      { color: #d97706; }
+:root .code-editor-wrap .cm-bool        { color: #db2777; }
+:root .code-editor-wrap .cm-null        { color: #64748b; }
+:root .code-editor-wrap .cm-propertyName{ color: #7c3aed; }
+:root .code-editor-wrap .cm-tagName     { color: #2563eb; }
+:root .code-editor-wrap .cm-attributeName{ color: #0891b2; }
+:root .code-editor-wrap .cm-attributeValue{ color: #16a34a; }
