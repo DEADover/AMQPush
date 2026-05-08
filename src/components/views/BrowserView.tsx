@@ -1,9 +1,14 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Radar, RotateCcw, Inbox, Send, X, XCircle, Loader2, Eye,
-  ChevronRight, ChevronDown, Copy,
+  Radar, RotateCcw, Inbox, Send, X, Loader2, Eye,
+  Copy, Tag, MessageSquare, Search,
 } from "lucide-react";
+import CollapsibleSection from "../CollapsibleSection";
+import PropsList from "../PropsList";
+import EmptyState from "../EmptyState";
+import { fmtBytes } from "../../utils/format";
+import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
 interface BrokerQueue {
   name: string;
@@ -62,7 +67,7 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
   const [sortDir,   setSortDir]   = useState<SortDir>("asc");
   const [hideEmpty, setHideEmpty] = useState(false);
   const [autoOn,    setAutoOn]    = useState(true);
-  const [pollErr,   setPollErr]   = useState<string | null>(null); // silent error from polling
+  const [pollErr,   setPollErr]   = useState<string | null>(null);
 
   // Peek state — selected queue and messages
   const [selectedQueue, setSelectedQueue] = useState<string | null>(null);
@@ -73,11 +78,9 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
   const [openMessageIdx, setOpenMessageIdx] = useState<number | null>(null);
 
   // ─── Auto-refresh queue list (cheap call: only metrics, no message bodies) ──
-  // Polls every 2.5s while view is visible AND connected AND auto enabled.
   useEffect(() => {
     if (!connected || !visible || !autoOn) return;
 
-    // Initial load
     if (!loaded && !loading) refreshQueues(false);
 
     const id = setInterval(() => { refreshQueues(true); }, QUEUE_POLL_INTERVAL_MS);
@@ -103,7 +106,7 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
     } catch (e) {
       const msg = String(e);
       if (silent) {
-        setPollErr(msg); // surface in top bar without log spam
+        setPollErr(msg);
       } else {
         setErr(msg);
         onLog("err", `Browse failed: ${msg}`);
@@ -146,6 +149,11 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
     else { setSortKey(key); setSortDir("asc"); }
   }
 
+  function skipIfSelecting(): boolean {
+    const sel = window.getSelection?.()?.toString();
+    return !!sel && sel.length > 0;
+  }
+
   // Filter + sort
   let filtered = queues;
   if (search.trim()) {
@@ -177,31 +185,39 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
           </span>
         )}
 
-        <div className="flex items-center gap-1 ml-auto">
-          {/* Polling status indicator */}
-          {connected && autoOn && pollErr ? (
-            <span className="flex items-center gap-1 text-[10px] text-amber-500 font-mono px-2" title={`Polling error: ${pollErr}`}>
-              <span className="w-1 h-1 rounded-full bg-amber-500" />
-              poll error
-            </span>
-          ) : connected && autoOn && loaded ? (
-            <span className="flex items-center gap-1 text-[10px] text-t-ink5 font-mono px-2" title={`Auto-refresh every ${QUEUE_POLL_INTERVAL_MS / 1000}s`}>
-              <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
-              live
-            </span>
-          ) : null}
+        {/* Live / poll-error indicator — same shape as SubscriberView's session strip */}
+        {connected && autoOn && pollErr ? (
+          <span className="flex items-center gap-1 text-[10px] text-amber-500 font-mono" title={`Polling error: ${pollErr}`}>
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+            poll error
+          </span>
+        ) : connected && autoOn && loaded ? (
+          <span className="flex items-center gap-1 text-[10px] text-t-ink5 font-mono" title={`Auto-refresh every ${QUEUE_POLL_INTERVAL_MS / 1000}s`}>
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            live
+          </span>
+        ) : null}
 
-          <label className="flex items-center gap-1 text-[11px] text-t-ink4 cursor-pointer select-none px-2"
-            title={autoOn ? "Auto-refresh enabled — disable to pause" : "Auto-refresh paused"}>
-            <input type="checkbox" checked={autoOn} onChange={e => setAutoOn(e.target.checked)}
-              className="w-3 h-3 accent-blue-600 cursor-pointer" />
-            Auto
-          </label>
-          <label className="flex items-center gap-1 text-[11px] text-t-ink4 cursor-pointer select-none px-2">
-            <input type="checkbox" checked={hideEmpty} onChange={e => setHideEmpty(e.target.checked)}
-              className="w-3 h-3 accent-blue-600 cursor-pointer" />
+        <div className="flex items-center gap-1 ml-auto">
+          {/* Pill toggles in the SubscriberView style — replaces native checkboxes */}
+          <button
+            onClick={() => setAutoOn(a => !a)}
+            className={`text-[11px] transition-colors px-1.5 py-0.5 rounded ${
+              autoOn ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink3"
+            }`}
+            title={autoOn ? "Auto-refresh on — click to pause" : "Auto-refresh paused"}
+          >
+            {autoOn ? "● auto" : "○ auto"}
+          </button>
+          <button
+            onClick={() => setHideEmpty(h => !h)}
+            className={`text-[11px] transition-colors px-1.5 py-0.5 rounded ${
+              hideEmpty ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink3"
+            }`}
+            title="Hide queues with zero messages"
+          >
             Hide empty
-          </label>
+          </button>
           <button onClick={() => refreshQueues(false)} disabled={!connected || loading}
             className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1 disabled:opacity-40">
             <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
@@ -209,14 +225,17 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
         </div>
       </div>
 
-      {/* ─── SEARCH BAR ─── */}
+      {/* ─── FILTER BAR — only when there are queues to filter ─── */}
       {loaded && queues.length > 0 && (
         <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
+          <Search className="w-3.5 h-3.5 text-t-ink5 shrink-0" />
           <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Filter queues by name or address…"
-            className="flex-1 bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5" />
+            className="flex-1 bg-transparent text-xs text-t-ink outline-none placeholder:text-t-ink5" />
           {search && (
-            <button onClick={() => setSearch("")} className="text-t-ink5 hover:text-t-ink3"><X className="w-3 h-3" /></button>
+            <button onClick={() => setSearch("")} className="text-t-ink5 hover:text-t-ink3 transition-colors">
+              <X className="w-3 h-3" />
+            </button>
           )}
         </div>
       )}
@@ -231,18 +250,20 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
           ) : loading && queues.length === 0 ? (
             <EmptyState icon={<Loader2 className="w-8 h-8 animate-spin" />} title="Querying broker…" />
           ) : err ? (
-            <div className="flex flex-col items-center justify-center h-full text-t-ink5 max-w-md mx-auto text-center">
-              <XCircle className="w-8 h-8 mb-3 text-red-500/60" />
-              <p className="text-[13px] text-red-500">Discovery failed</p>
-              <p className="text-[11px] mt-1 break-all">{err}</p>
-              <button onClick={() => refreshQueues(false)}
-                className="mt-3 px-2.5 py-1 rounded-md text-[11px] font-medium bg-t-card border border-t-line text-t-ink2 hover:bg-t-hover transition-colors">
-                Retry
-              </button>
-              <p className="text-[10px] mt-3 text-t-ink5">
-                Requires Artemis or ActiveMQ Classic with AMQP management enabled
-              </p>
-            </div>
+            <EmptyState
+              variant="error"
+              title="Discovery failed"
+              subtitle={<>
+                {err}
+                <p className="text-[10px] mt-3 text-t-ink5">Requires Artemis or ActiveMQ Classic with AMQP management enabled</p>
+              </>}
+              action={
+                <button onClick={() => refreshQueues(false)}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-t-card border border-t-line text-t-ink2 hover:bg-t-hover transition-colors">
+                  Retry
+                </button>
+              }
+            />
           ) : filtered.length === 0 ? (
             <EmptyState icon={<Radar className="w-8 h-8" />} title={search || hideEmpty ? "No queues match" : "No queues on broker"} />
           ) : (
@@ -263,28 +284,28 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                     const isSel = selectedQueue === bq.address;
                     return (
                       <tr key={bq.name}
-                        onClick={() => peekQueue(bq.address)}
-                        className={`group cursor-pointer border-b border-t-line/50 transition-colors ${
+                        onClick={() => { if (skipIfSelecting()) return; peekQueue(bq.address); }}
+                        className={`group cursor-pointer border-b border-t-line/40 transition-colors ${
                           isSel ? "bg-blue-500/10" : "hover:bg-t-hover/50"
                         }`}>
-                        <td className="py-1 px-3 truncate">
+                        <td className="py-1.5 px-3 truncate">
                           <span className="text-t-ink">{bq.name}</span>
                         </td>
-                        <td className="py-1 px-2">
-                          <span className={`text-[10px] px-1 py-0 rounded font-medium ${
+                        <td className="py-1.5 px-2">
+                          <span className={`text-[10px] px-1 rounded font-medium ${
                             bq.routing_type === "ANYCAST" ? "bg-blue-500/15 text-blue-500" : "bg-violet-500/15 text-violet-500"
                           }`}>{bq.routing_type === "ANYCAST" ? "ANY" : "MULTI"}</span>
                         </td>
-                        <td className={`py-1 px-2 text-right ${bq.message_count > 0 ? "text-t-ink font-medium" : "text-t-ink5"}`}>
+                        <td className={`py-1.5 px-2 text-right ${bq.message_count > 0 ? "text-t-ink font-medium" : "text-t-ink5"}`}>
                           {bq.message_count}
                         </td>
-                        <td className={`py-1 px-2 text-right ${bq.consumer_count > 0 ? "text-green-500" : "text-t-ink5"}`}>
+                        <td className={`py-1.5 px-2 text-right ${bq.consumer_count > 0 ? "text-green-500" : "text-t-ink5"}`}>
                           {bq.consumer_count}
                         </td>
                         {!selectedQueue && (
-                          <td className="py-1 px-2 truncate text-t-ink4 text-[11px]">{bq.address}</td>
+                          <td className="py-1.5 px-2 truncate text-t-ink4 text-[11px]">{bq.address}</td>
                         )}
-                        <td className="py-1 pr-2">
+                        <td className="py-1.5 pr-2">
                           <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <IconBtn title="Publish to" onClick={(e) => { e.stopPropagation(); onPublishTo(bq.address); }} colorClass="hover:text-blue-500 hover:bg-blue-500/10">
                               <Send className="w-3 h-3" />
@@ -306,9 +327,10 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
         {/* ─── RIGHT: PEEK PANE ─── */}
         {selectedQueue && (
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+            {/* Peek pane header — matches SubscriberView preview header style */}
             <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
               <Eye className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
-              <span className="text-[13px] font-semibold text-t-ink truncate">{selectedQueue}</span>
+              <span className="text-[12px] text-t-ink font-mono truncate" title={selectedQueue}>{selectedQueue}</span>
               {!peekLoading && !peekErr && (
                 <span className="text-[11px] text-t-ink5 font-mono">{messages.length} peeked</span>
               )}
@@ -319,65 +341,63 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                   title="Max messages to peek">
                   {[5, 10, 20, 50, 100].map(n => <option key={n} value={n}>{n}</option>)}
                 </select>
-                <IconBtn title="Refresh" onClick={() => peekQueue(selectedQueue)} colorClass="hover:text-blue-500 hover:bg-blue-500/10">
-                  <RotateCcw className={`w-3 h-3 ${peekLoading ? "animate-spin" : ""}`} />
-                </IconBtn>
-                <IconBtn title="Close" onClick={closePeek} colorClass="hover:text-t-ink hover:bg-t-hover">
+                <button onClick={() => peekQueue(selectedQueue)}
+                  title="Refresh"
+                  className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors">
+                  <RotateCcw className={`w-3 h-3 ${peekLoading ? "animate-spin" : ""}`} /> Refresh
+                </button>
+                <button onClick={closePeek}
+                  title="Close peek"
+                  className="p-1 rounded text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors">
                   <X className="w-3 h-3" />
-                </IconBtn>
+                </button>
               </div>
             </div>
 
             {peekLoading ? (
               <EmptyState icon={<Loader2 className="w-8 h-8 animate-spin" />} title="Peeking messages…" subtitle="Reading from queue without consuming" />
             ) : peekErr ? (
-              <div className="flex flex-col items-center justify-center h-full text-t-ink5 max-w-md mx-auto text-center">
-                <XCircle className="w-8 h-8 mb-3 text-red-500/60" />
-                <p className="text-[13px] text-red-500">Peek failed</p>
-                <p className="text-[11px] mt-1 break-all">{peekErr}</p>
-              </div>
+              <EmptyState variant="error" title="Peek failed" subtitle={peekErr} />
             ) : messages.length === 0 ? (
               <EmptyState icon={<Inbox className="w-8 h-8" />} title="Queue is empty" />
             ) : (
               <>
-                {/* Compact message table — id + datetime + size + content type */}
+                {/* List of peeked messages — visually matches SubscriberView's received list */}
                 <div className="flex-1 overflow-auto min-h-0 border-b border-t-line">
-                  <table className="w-full text-[11px] font-mono">
-                    <thead className="sticky top-0 z-10 bg-t-panel border-b border-t-line">
-                      <tr className="text-[10px] uppercase tracking-wider text-t-ink4">
-                        <th className="text-left py-1 pl-3 w-8">#</th>
-                        <th className="text-left py-1 pr-2">Message ID</th>
-                        <th className="text-left py-1 px-2 w-24">Time</th>
-                        <th className="text-right py-1 px-2 w-16">Size</th>
-                        <th className="text-left py-1 pr-3 w-28">Content type</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {messages.map((msg, i) => {
-                        const isOpen = openMessageIdx === i;
-                        const idText = msg.message_id ?? <em className="text-t-ink5">—</em>;
-                        const timeText = msg.creation_time
-                          ? new Date(msg.creation_time).toLocaleTimeString()
-                          : <em className="text-t-ink5">—</em>;
-                        const ct = msg.content_type ?? msg.body_kind;
-                        return (
-                          <tr key={i}
-                            onClick={() => setOpenMessageIdx(isOpen ? null : i)}
-                            className={`cursor-pointer border-b border-t-line/40 transition-colors ${
-                              isOpen ? "bg-blue-500/10" : "hover:bg-t-hover/50"
-                            }`}>
-                            <td className="py-1 pl-3 text-t-ink5">{i + 1}</td>
-                            <td className="py-1 pr-2 truncate text-t-ink2" title={msg.message_id ?? ""}>{idText}</td>
-                            <td className="py-1 px-2 text-t-ink3 whitespace-nowrap">{timeText}</td>
-                            <td className="py-1 px-2 text-right text-t-ink4">{msg.body_size}</td>
-                            <td className="py-1 pr-3 truncate text-t-ink3" title={ct}>
-                              <span className="text-[10px] px-1 py-0 rounded bg-t-hover text-t-ink3">{ct}</span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                  {messages.map((msg, i) => {
+                    const isOpen = openMessageIdx === i;
+                    const idShort = msg.message_id ?? "—";
+                    const ct = msg.content_type ?? msg.body_kind;
+                    const timeText = msg.creation_time
+                      ? new Date(msg.creation_time).toLocaleTimeString()
+                      : "—";
+                    return (
+                      <button
+                        key={i}
+                        onClick={() => { if (skipIfSelecting()) return; setOpenMessageIdx(isOpen ? null : i); }}
+                        className={`w-full text-left flex flex-col gap-0.5 px-3 py-2 border-b border-t-line/40 transition-colors border-l-2 border-l-transparent ${
+                          isOpen ? "bg-blue-500/10" : "hover:bg-t-hover/50"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 text-[11px]">
+                          <MessageSquare className="w-3 h-3 text-t-ink5 shrink-0" />
+                          <span className="text-t-ink5 font-mono shrink-0">#{i + 1}</span>
+                          <span className="text-t-ink2 font-mono truncate flex-1" title={msg.message_id ?? ""}>{idShort}</span>
+                          <span className="text-t-ink5 font-mono shrink-0">{timeText}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] pl-5">
+                          <span className="px-1 rounded bg-t-hover text-t-ink3 font-mono">{ct}</span>
+                          <span className="text-t-ink5 font-mono">{fmtBytes(msg.body_size)}</span>
+                          {msg.priority !== null && msg.priority !== 4 && (
+                            <span className="text-t-ink4 font-mono">P{msg.priority}</span>
+                          )}
+                          {msg.delivery_count > 0 && (
+                            <span className="text-t-ink4 font-mono" title="Delivery count">↻ {msg.delivery_count}</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
 
                 {/* Selected message details */}
@@ -421,45 +441,44 @@ function IconBtn({ title, onClick, colorClass, children }: {
   );
 }
 
-function EmptyState({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle?: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center h-full text-t-ink5">
-      <div className="opacity-40 mb-3">{icon}</div>
-      <p className="text-[13px]">{title}</p>
-      {subtitle && <p className="text-[11px] mt-1">{subtitle}</p>}
-    </div>
-  );
-}
-
 function MessageDetails({ msg, idx, onLog }: { msg: PeekedMessage; idx: number; onLog: (k: "info" | "ok" | "err", t: string) => void }) {
   const [bodyOpen,  setBodyOpen]  = useState(true);
   const [propsOpen, setPropsOpen] = useState(true);
   const [appOpen,   setAppOpen]   = useState(true);
+  const [bodyMode,  setBodyMode]  = useState<"auto" | "raw" | "hex">("auto");
+
+  // Reset body view-mode when switching message
+  useEffect(() => { setBodyMode("auto"); }, [idx]);
 
   const appProps = Object.entries(msg.application_properties);
+  const detected = detectFormat({ contentType: msg.content_type, bodyText: msg.body_text });
 
-  const prettyBody = (() => {
-    if (!msg.body_text) return null;
-    if (msg.content_type?.includes("json") || msg.body_text.trimStart().startsWith("{") || msg.body_text.trimStart().startsWith("[")) {
-      try { return JSON.stringify(JSON.parse(msg.body_text), null, 2); } catch { return null; }
-    }
-    return null;
+  const bodyContent = (() => {
+    const raw = msg.body_text ?? "";
+    if (!raw) return null;
+    if (bodyMode === "hex") return hexDump(raw);
+    if (bodyMode === "raw") return raw;
+    if (detected === "json") return tryPrettyJson(raw) ?? raw;
+    if (detected === "xml")  return tryPrettyXml(raw)  ?? raw;
+    return raw;
   })();
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 text-[11px]">
+      {/* Header chips — match Subscriber/History */}
+      <div className="flex items-center gap-2 text-[11px] flex-wrap">
         <span className="text-t-ink5 font-mono">#{idx + 1}</span>
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-t-hover text-t-ink3 font-medium uppercase">{msg.body_kind}</span>
-        <span className="text-t-ink5 font-mono">{msg.body_size} B</span>
+        <span className="text-t-ink5 font-mono">{fmtBytes(msg.body_size)}</span>
         {msg.delivery_count > 0 && (
           <span className="text-t-ink4" title="Delivery count">↻ {msg.delivery_count}</span>
         )}
         {msg.priority !== null && msg.priority !== 4 && <span className="text-t-ink4">P{msg.priority}</span>}
+        {msg.durable && <span className="text-blue-500">durable</span>}
       </div>
 
-      <CollapsibleSection title="Properties" open={propsOpen} onToggle={() => setPropsOpen(o => !o)}>
-        <PropsTable items={[
+      <CollapsibleSection title="Properties" icon={<Tag className="w-3 h-3" />} open={propsOpen} onToggle={() => setPropsOpen(o => !o)}>
+        <PropsList onLog={onLog} items={[
           ["message-id",       msg.message_id],
           ["correlation-id",   msg.correlation_id],
           ["reply-to",         msg.reply_to],
@@ -481,59 +500,52 @@ function MessageDetails({ msg, idx, onLog }: { msg: PeekedMessage; idx: number; 
       </CollapsibleSection>
 
       {appProps.length > 0 && (
-        <CollapsibleSection title={`Application Properties (${appProps.length})`} open={appOpen} onToggle={() => setAppOpen(o => !o)}>
-          <PropsTable items={appProps} />
+        <CollapsibleSection title={`Application Properties (${appProps.length})`} icon={<Tag className="w-3 h-3" />} open={appOpen} onToggle={() => setAppOpen(o => !o)}>
+          <PropsList onLog={onLog} items={appProps} />
         </CollapsibleSection>
       )}
 
       <CollapsibleSection
         title="Body"
+        icon={<MessageSquare className="w-3 h-3" />}
         open={bodyOpen}
         onToggle={() => setBodyOpen(o => !o)}
-        action={msg.body_text ? (
-          <button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(msg.body_text!); onLog("info", "Body copied"); }}
-            className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover">
-            <Copy className="w-3 h-3" /> Copy
-          </button>
-        ) : null}
+        action={
+          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center bg-t-card border border-t-line rounded overflow-hidden">
+              {(["auto", "raw", "hex"] as const).map(m => (
+                <button
+                  key={m}
+                  onClick={(e) => { e.stopPropagation(); setBodyMode(m); }}
+                  className={`px-1.5 py-0.5 text-[10px] font-mono uppercase transition-colors ${
+                    bodyMode === m ? "bg-blue-500/15 text-blue-500" : "text-t-ink4 hover:text-t-ink2 hover:bg-t-hover"
+                  }`}
+                  title={
+                    m === "auto" ? `Auto (${detected})` :
+                    m === "raw"  ? "Raw text" : "Hex dump"
+                  }
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            {msg.body_text && (
+              <button onClick={(e) => {
+                e.stopPropagation();
+                navigator.clipboard.writeText(msg.body_text!);
+                onLog("info", "Body copied");
+              }}
+                className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover">
+                <Copy className="w-3 h-3" /> Copy
+              </button>
+            )}
+          </div>
+        }
       >
-        <pre className="text-[11px] text-t-ink2 font-mono bg-t-field border border-t-line rounded-md p-2.5 overflow-x-auto whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
-          {prettyBody ?? msg.body_text ?? <em className="text-t-ink5">no body</em>}
+        <pre className="text-[11px] text-t-ink2 font-mono bg-t-field border border-t-line rounded-md p-2.5 overflow-x-auto whitespace-pre break-all max-h-64 overflow-y-auto select-text">
+          {bodyContent ?? <em className="text-t-ink5">no body</em>}
         </pre>
       </CollapsibleSection>
-    </div>
-  );
-}
-
-function CollapsibleSection({ title, open, onToggle, action, children }: {
-  title: string; open: boolean; onToggle: () => void; action?: React.ReactNode; children: React.ReactNode;
-}) {
-  return (
-    <div className="border border-t-line rounded-md overflow-hidden bg-t-panel">
-      <div className="flex items-center justify-between px-2 py-1 bg-t-card/60">
-        <button onClick={onToggle}
-          className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-t-ink4 font-semibold hover:text-t-ink2 transition-colors">
-          {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          {title}
-        </button>
-        {action}
-      </div>
-      {open && <div className="p-2">{children}</div>}
-    </div>
-  );
-}
-
-function PropsTable({ items }: { items: Array<[string, string | null | undefined]> }) {
-  const visible = items.filter(([_, v]) => v !== null && v !== undefined && v !== "");
-  if (visible.length === 0) return <p className="text-[11px] text-t-ink5">—</p>;
-  return (
-    <div className="grid grid-cols-[140px_1fr] gap-x-3 gap-y-0.5 text-[11px] font-mono">
-      {visible.map(([k, v]) => (
-        <div key={k} className="contents">
-          <span className="text-t-ink4 truncate">{k}</span>
-          <span className="text-t-ink2 break-all">{String(v)}</span>
-        </div>
-      ))}
     </div>
   );
 }

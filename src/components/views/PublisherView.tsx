@@ -21,6 +21,8 @@ interface Props {
     fileName?: string;
     fileDataB64?: string;
     properties?: Record<string, string>;
+    /** When set, becomes a `correlation-id` custom property pre-filled in Properties. */
+    correlationId?: string;
     nonce: number;
   } | null;
   sendTrigger?: number;
@@ -167,12 +169,27 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     }
 
     // Restore custom properties (excluding internal markers)
+    const propRows: PropertyRow[] = [];
     if (resendPayload.properties) {
-      const rows = Object.entries(resendPayload.properties)
-        .filter(([k]) => k !== "is_file" && k !== "_AMQ_ROUTING_TYPE" && k !== "file_name")
-        .map(([k, v]) => ({ id: ++rowId, enabled: true, key: k, value: v, description: "" }));
-      setProps(rows);
+      for (const [k, v] of Object.entries(resendPayload.properties)) {
+        if (k === "is_file" || k === "_AMQ_ROUTING_TYPE" || k === "file_name") continue;
+        // Skip correlation-id from resendPayload.properties since we set it
+        // explicitly below (avoids duplicate row when Reply provides it).
+        if (k === "correlation-id" && resendPayload.correlationId) continue;
+        propRows.push({ id: ++rowId, enabled: true, key: k, value: v, description: "" });
+      }
     }
+    // Reply flow: pre-fill correlation-id as a custom property so the upstream
+    // request-reply pattern keeps its tracking id.
+    if (resendPayload.correlationId) {
+      propRows.unshift({
+        id: ++rowId, enabled: true,
+        key: "correlation-id", value: resendPayload.correlationId,
+        description: "From received message (reply)",
+      });
+    }
+    setProps(propRows);
+
     setTab("body");
   }, [resendPayload?.nonce]);
 

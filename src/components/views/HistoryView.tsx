@@ -1,7 +1,15 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { History, Search, Trash2, Copy, RotateCcw, FileText, Tag, Clock, Hash, Download, Inbox, User, Layers, Mail } from "lucide-react";
+import {
+  History, Search, Trash2, Copy, RotateCcw, FileText, Tag, Download, Inbox, Mail,
+  MessageSquare, X,
+} from "lucide-react";
 import { HistoryEntry } from "../../types";
+import CollapsibleSection from "../CollapsibleSection";
+import PropsList from "../PropsList";
+import EmptyState from "../EmptyState";
+import { fmtBytes } from "../../utils/format";
+import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
 interface ResendArg { address: string; body?: string; fileName?: string; fileDataB64?: string; properties?: Record<string, string> }
 
@@ -76,9 +84,16 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
       <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
         <History className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
         <span className="text-[13px] font-semibold text-t-ink">History</span>
-        <span className="text-[11px] text-t-ink5 font-mono">{entries.length} sent</span>
+        <span className="text-[11px] text-t-ink5 font-mono">
+          {filtered.length === entries.length ? `${entries.length} sent` : `${filtered.length} / ${entries.length}`}
+        </span>
 
         <div className="flex items-center gap-1 ml-auto">
+          <button onClick={load}
+            className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1"
+            title="Refresh">
+            <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </button>
           <button onClick={() => exportAs("json")} disabled={entries.length === 0}
             className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
             <Download className="w-3 h-3" /> JSON
@@ -94,30 +109,34 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
         </div>
       </div>
 
-      {/* ─── FILTER BAR ─── */}
-      <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <Search className="w-3.5 h-3.5 text-t-ink5 shrink-0" />
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter by ID, profile, queue, or body…"
-          className="flex-1 bg-transparent text-xs text-t-ink outline-none placeholder:text-t-ink5" />
-        {filtered.length !== entries.length && (
-          <span className="text-[11px] text-t-ink4 shrink-0">{filtered.length} / {entries.length}</span>
-        )}
-        <button onClick={load} className="p-1 text-t-ink4 hover:text-t-ink2 transition-colors rounded" title="Refresh">
-          <RotateCcw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-        </button>
-      </div>
+      {/* ─── FILTER BAR — only when entries exist ─── */}
+      {entries.length > 0 && (
+        <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
+          <Search className="w-3.5 h-3.5 text-t-ink5 shrink-0" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter by ID, profile, queue, or body…"
+            className="flex-1 bg-transparent text-xs text-t-ink outline-none placeholder:text-t-ink5" />
+          {search && (
+            <button onClick={() => setSearch("")} className="text-t-ink5 hover:text-t-ink3 transition-colors">
+              <X className="w-3 h-3" />
+            </button>
+          )}
+          {filtered.length !== entries.length && (
+            <span className="text-[11px] text-t-ink4 shrink-0">{filtered.length} / {entries.length}</span>
+          )}
+        </div>
+      )}
 
       {/* ─── SPLIT BODY: list (left) + preview (right) ─── */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
 
         {/* ─── LIST ─── */}
-        <div className="w-[40%] min-w-[280px] max-w-[480px] border-r border-t-line flex flex-col min-h-0 overflow-hidden">
+        <div className={`${selected ? "w-[42%] border-r border-t-line" : "flex-1"} flex flex-col min-w-0 min-h-0 overflow-hidden`}>
           {filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-t-ink5">
-              <History className="w-8 h-8 mb-3 opacity-40" />
-              <p className="text-[13px]">{search ? "No matching entries" : "No sent messages yet"}</p>
-              {!search && <p className="text-[11px] mt-1">Messages you send will appear here</p>}
-            </div>
+            <EmptyState
+              icon={<History className="w-8 h-8" />}
+              title={search ? "No matching entries" : "No sent messages yet"}
+              subtitle={search ? undefined : "Messages you send will appear here"}
+            />
           ) : (
             <div className="flex-1 overflow-y-auto">
               {filtered.map(entry => (
@@ -130,68 +149,65 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
         </div>
 
         {/* ─── PREVIEW PANE ─── */}
-        <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
-          {selected ? (
-            <PreviewPane entry={selected} onResend={onResend} onLog={onLog} />
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-t-ink5">
-              <Inbox className="w-10 h-10 mb-3 opacity-40" />
-              <p className="text-[13px]">Select a message to preview</p>
-            </div>
-          )}
-        </div>
+        {selected && (
+          <PreviewPane
+            entry={selected}
+            onResend={onResend}
+            onLog={onLog}
+            onClose={() => setSelectedId(null)}
+          />
+        )}
+        {!selected && filtered.length > 0 && (
+          <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
+            <EmptyState
+              icon={<Inbox className="w-8 h-8" />}
+              title="Select a message to preview"
+            />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// ─── List item — compact row in left pane ────────────────────────────────────
+// ─── List item — compact row in left pane ───────────────────────────────────
+//
+// Layout matches SubscriberView: row 1 has icon + ID + timestamp (right-aligned);
+// row 2 has profile · queue · prop-count, indented `pl-5`. No standalone-row
+// timestamp at the top.
 
 function ListItem({ entry, selected, onClick }: { entry: HistoryEntry; selected: boolean; onClick: () => void }) {
   const propCount = Object.keys(entry.properties).length;
 
   return (
     <button onClick={onClick}
-      className={`w-full flex items-start gap-2 px-3 py-2 text-left border-b border-t-line/40 transition-colors ${
-        selected ? "bg-blue-500/10" : "hover:bg-t-hover/60"
+      className={`w-full text-left flex flex-col gap-0.5 px-3 py-2 border-b border-t-line/40 transition-colors border-l-2 border-l-transparent ${
+        selected ? "bg-blue-500/10" : "hover:bg-t-hover/50"
       }`}>
-      <span className="shrink-0 mt-0.5">
+      <div className="flex items-center gap-2 text-[11px]">
         {entry.is_file
-          ? <FileText className="w-3.5 h-3.5 text-amber-500" />
-          : <Mail     className="w-3.5 h-3.5 text-t-ink4" />}
-      </span>
-      <div className="flex-1 min-w-0">
-        {/* Row 1 — date / time (primary visual line) */}
-        <div className="flex items-center gap-1 text-[11px] text-t-ink2 font-mono">
-          <Clock className="w-2.5 h-2.5 text-t-ink4 shrink-0" />
-          {entry.timestamp}
-        </div>
-
-        {/* Row 2 — full message ID */}
-        <div className="text-[11px] font-mono text-t-ink truncate mt-0.5" title={entry.id}>
-          {entry.id}
-        </div>
-
-        {/* Row 3 — profile · queue */}
-        <div className="flex items-center gap-2 text-[10px] text-t-ink4 font-mono mt-1">
-          {entry.profile && (
-            <>
-              <span className="flex items-center gap-0.5 truncate min-w-0" title={`Profile: ${entry.profile}`}>
-                <User className="w-2.5 h-2.5 shrink-0" />
-                <span className="truncate">{entry.profile}</span>
-              </span>
-              <span className="text-t-ink5 shrink-0">·</span>
-            </>
-          )}
-          <span className="flex items-center gap-0.5 text-blue-500 truncate min-w-0" title={`Queue: ${entry.address}`}>
-            <Layers className="w-2.5 h-2.5 shrink-0" />
-            <span className="truncate">{entry.address}</span>
+          ? <FileText className="w-3 h-3 text-amber-500 shrink-0" />
+          : <Mail     className="w-3 h-3 text-t-ink5 shrink-0" />}
+        <span className="text-t-ink2 font-mono truncate flex-1" title={entry.id}>{entry.id}</span>
+        <span className="text-t-ink5 font-mono shrink-0">{entry.timestamp}</span>
+      </div>
+      <div className="flex items-center gap-2 text-[10px] pl-5">
+        {entry.profile && (
+          <span className="text-t-ink4 font-mono truncate" title={`Profile: ${entry.profile}`}>
+            {entry.profile}
           </span>
-        </div>
-
+        )}
+        <span className="px-1 rounded bg-blue-500/15 text-blue-500 font-mono font-medium truncate" title={`Queue: ${entry.address}`}>
+          {entry.address}
+        </span>
         {propCount > 0 && (
-          <span className="inline-flex items-center gap-0.5 text-[9px] text-t-ink4 mt-1">
-            <Tag className="w-2.5 h-2.5" />{propCount} {propCount === 1 ? "prop" : "props"}
+          <span className="text-t-ink5 font-mono">
+            {propCount} {propCount === 1 ? "prop" : "props"}
+          </span>
+        )}
+        {entry.is_file && entry.file_name && (
+          <span className="text-amber-500 font-mono truncate" title={`File: ${entry.file_name}`}>
+            {entry.file_name}
           </span>
         )}
       </div>
@@ -201,159 +217,198 @@ function ListItem({ entry, selected, onClick }: { entry: HistoryEntry; selected:
 
 // ─── Preview pane — full details on the right ───────────────────────────────
 
-function PreviewPane({ entry, onResend, onLog }: {
+function PreviewPane({ entry, onResend, onLog, onClose }: {
   entry: HistoryEntry;
   onResend: (a: ResendArg) => void;
   onLog: (k: "info" | "ok" | "err", t: string) => void;
+  onClose: () => void;
 }) {
-  const hasProps = Object.keys(entry.properties).length > 0;
+  const [bodyMode,  setBodyMode]  = useState<"auto" | "raw" | "hex">("auto");
+  const [propsOpen, setPropsOpen] = useState(true);
+  const [autoOpen,  setAutoOpen]  = useState(true);
+  const [customOpen, setCustomOpen] = useState(true);
+  const [bodyOpen,  setBodyOpen]  = useState(true);
 
-  // Pretty-format JSON body if applicable
+  // Reset body viewer mode when selection changes
+  useEffect(() => { setBodyMode("auto"); }, [entry.id]);
+
   const bodyText = entry.body_full ?? entry.body_preview;
-  const prettyBody = useMemo(() => {
-    if (!bodyText || entry.is_file) return null;
-    const trimmed = bodyText.trimStart();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-      try { return JSON.stringify(JSON.parse(bodyText), null, 2); } catch { return null; }
-    }
-    return null;
-  }, [bodyText, entry.is_file]);
+
+  // Pull content-type out of saved auto/custom properties so format detection
+  // works for non-default types (XML, plain text). Auto props win since
+  // those are what AMQPush actually sets on send.
+  const contentType =
+    entry.auto_properties?.["content-type"] ??
+    entry.properties?.["content-type"] ??
+    null;
+
+  const detected = detectFormat({ contentType, bodyText });
+  const hasProps = Object.keys(entry.properties).length > 0;
+  const autoEntries = Object.entries(entry.auto_properties ?? {})
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  // Compose body content according to view-mode
+  const bodyContent = (() => {
+    if (entry.is_file || !bodyText) return null;
+    if (bodyMode === "hex") return hexDump(bodyText);
+    if (bodyMode === "raw") return bodyText;
+    if (detected === "json") return tryPrettyJson(bodyText) ?? bodyText;
+    if (detected === "xml")  return tryPrettyXml(bodyText)  ?? bodyText;
+    return bodyText;
+  })();
+
+  const bodyBytes = bodyText ? new TextEncoder().encode(bodyText).length : 0;
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden select-text">
-      {/* Preview header — title row */}
-      <div className="shrink-0 px-4 py-2.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        {entry.is_file
-          ? <FileText className="w-4 h-4 text-amber-500 shrink-0" />
-          : <Hash className="w-4 h-4 text-t-ink4 shrink-0" />}
-        <span className="text-[13px] font-mono text-blue-500 font-medium truncate">{entry.address}</span>
-        <span className="ml-auto text-[11px] text-t-ink5 font-mono shrink-0 flex items-center gap-1">
-          <Clock className="w-3 h-3" /> {entry.timestamp}
-        </span>
-      </div>
+    <div className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden select-text">
 
-      {/* Action buttons */}
-      <div className="shrink-0 px-4 py-2 border-b border-t-line flex items-center gap-2 bg-t-panel/60">
-        {!entry.is_file ? (
-          <>
-            <button onClick={() => onResend({ address: entry.address, body: bodyText, properties: entry.properties })}
-              className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors flex items-center gap-1.5">
+      {/* ─── PREVIEW HEADER (single row, px-3 py-1.5) ─── */}
+      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+        {entry.is_file
+          ? <FileText className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+          : <Mail     className="w-3.5 h-3.5 text-t-ink4 shrink-0" />}
+        <span className="text-[12px] text-t-ink font-mono truncate" title={entry.id}>{entry.id}</span>
+        <span className="text-[11px] text-t-ink5 font-mono shrink-0">{entry.timestamp}</span>
+        <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/15 text-blue-500 font-mono shrink-0" title={`Queue: ${entry.address}`}>
+          {entry.address}
+        </span>
+
+        <div className="ml-auto flex items-center gap-1">
+          {!entry.is_file ? (
+            <>
+              <button
+                onClick={() => onResend({ address: entry.address, body: bodyText, properties: entry.properties })}
+                title="Resend this message"
+                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-blue-500 hover:bg-blue-500/10 transition-colors"
+              >
+                <RotateCcw className="w-3 h-3" /> Resend
+              </button>
+              <button
+                onClick={() => { navigator.clipboard.writeText(bodyText); onLog("info", "Body copied"); }}
+                title="Copy body"
+                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors"
+              >
+                <Copy className="w-3 h-3" /> Copy
+              </button>
+            </>
+          ) : entry.file_data_b64 ? (
+            <button
+              onClick={() => onResend({ address: entry.address, fileName: entry.file_name ?? "file", fileDataB64: entry.file_data_b64!, properties: entry.properties })}
+              title="Resend this file"
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-blue-500 hover:bg-blue-500/10 transition-colors"
+            >
               <RotateCcw className="w-3 h-3" /> Resend
             </button>
-            <button onClick={() => { navigator.clipboard.writeText(bodyText); onLog("info", "Body copied"); }}
-              className="px-2.5 py-1 rounded-md text-[11px] font-medium border border-t-line text-t-ink3 hover:text-t-ink hover:bg-t-hover transition-colors flex items-center gap-1.5">
-              <Copy className="w-3 h-3" /> Copy body
-            </button>
-          </>
-        ) : entry.file_data_b64 ? (
-          <button onClick={() => onResend({ address: entry.address, fileName: entry.file_name ?? "file", fileDataB64: entry.file_data_b64!, properties: entry.properties })}
-            className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors flex items-center gap-1.5">
-            <RotateCcw className="w-3 h-3" /> Resend file
+          ) : null}
+          <button
+            onClick={onClose}
+            title="Close preview"
+            className="p-1 rounded text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors"
+          >
+            <X className="w-3 h-3" />
           </button>
-        ) : (
-          <span className="text-[11px] text-t-ink5 italic">file content not retained — too large or older entry</span>
-        )}
+        </div>
       </div>
 
-      {/* Scrollable detail body */}
-      <div className="flex-1 overflow-y-auto min-h-0 p-4 space-y-3">
+      {/* ─── PREVIEW BODY ─── */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
 
-        {/* ─── METADATA — message header info ─── */}
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-t-ink5 font-semibold mb-1.5 flex items-center gap-1">
-            <FileText className="w-3 h-3" />
-            Message
-          </p>
-          <div className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-1 text-[11px] font-mono border border-t-line rounded-md p-2.5 bg-t-card/40">
-            <span className="text-t-ink4 flex items-center gap-1"><Hash className="w-2.5 h-2.5" /> ID</span>
-            <span className="text-t-ink2 break-all">{entry.id}</span>
-
-            <span className="text-t-ink4 flex items-center gap-1"><Clock className="w-2.5 h-2.5" /> Time</span>
-            <span className="text-t-ink2">{entry.timestamp}</span>
-
-            <span className="text-t-ink4 flex items-center gap-1"><User className="w-2.5 h-2.5" /> Profile</span>
-            <span className="text-t-ink2">{entry.profile ?? <em className="text-t-ink5">— no profile —</em>}</span>
-
-            <span className="text-t-ink4 flex items-center gap-1"><Layers className="w-2.5 h-2.5" /> Queue</span>
-            <span className="text-blue-500 break-all">{entry.address}</span>
-
-            {entry.is_file && entry.file_name && (
-              <>
-                <span className="text-t-ink4 flex items-center gap-1"><FileText className="w-2.5 h-2.5" /> File</span>
-                <span className="text-t-ink2 break-all">{entry.file_name}</span>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* ─── AUTO-SET — what AMQPush adds to every message ─── */}
-        {Object.keys(entry.auto_properties ?? {}).length > 0 && (
-          <div>
-            <p className="text-[10px] uppercase tracking-wider text-t-ink5 font-semibold mb-1.5 flex items-center gap-1">
-              <Tag className="w-3 h-3" />
-              Auto-set headers / properties ({Object.keys(entry.auto_properties).length})
-              <span className="normal-case font-normal text-t-ink5">— added by AMQPush, sent over the wire</span>
-            </p>
-            <div className="grid grid-cols-[180px_1fr] gap-x-3 gap-y-0.5 text-[11px] font-mono border border-t-line rounded-md p-2.5 bg-t-card/40">
-              {Object.entries(entry.auto_properties).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => (
-                <div key={k} className="contents">
-                  <span className="text-t-ink4 truncate" title={k}>{k}</span>
-                  <span className="text-t-ink2 break-all">{v}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ─── USER PROPERTIES — what user set in the Properties tab ─── */}
-        <div>
-          <p className="text-[10px] uppercase tracking-wider text-t-ink5 font-semibold mb-1.5 flex items-center gap-1">
-            <Tag className="w-3 h-3" />
-            Custom properties ({Object.keys(entry.properties).length})
-            <span className="normal-case font-normal text-t-ink5">— from the Properties tab in Send</span>
-          </p>
-          {hasProps ? (
-            <div className="grid grid-cols-[180px_1fr] gap-x-3 gap-y-0.5 text-[11px] font-mono border border-t-line rounded-md p-2.5 bg-t-card/40">
-              {Object.entries(entry.properties).map(([k, v]) => (
-                <div key={k} className="contents">
-                  <span className="text-t-ink4 truncate" title={k}>{k}</span>
-                  <span className="text-t-ink2 break-all">{v}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-[11px] text-t-ink5 italic px-2.5">— none —</p>
+        {/* Header chips — match SubscriberView */}
+        <div className="flex items-center gap-2 text-[11px] flex-wrap">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-t-hover text-t-ink3 font-medium uppercase">
+            {entry.is_file ? "binary" : detected}
+          </span>
+          {bodyText && <span className="text-t-ink5 font-mono">{fmtBytes(bodyBytes)}</span>}
+          {entry.is_file && entry.file_name && (
+            <span className="text-amber-500 font-mono">{entry.file_name}</span>
+          )}
+          {entry.is_file && (
+            <span className={`font-mono ${entry.file_data_b64 ? "text-green-500" : "text-t-ink5"}`}>
+              {entry.file_data_b64 ? "stored" : "content not retained"}
+            </span>
           )}
         </div>
 
-        {/* ─── BODY ─── */}
-        {!entry.is_file ? (
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-[10px] uppercase tracking-wider text-t-ink5 font-semibold flex items-center gap-1">
-                <FileText className="w-3 h-3" /> Body
-              </p>
-              <span className="text-[10px] text-t-ink5 font-mono">
-                {new TextEncoder().encode(bodyText).length} B
-                {prettyBody && " · JSON"}
-              </span>
-            </div>
-            <pre className="text-[11px] text-t-ink2 font-mono bg-t-field border border-t-line rounded-md p-3 overflow-x-auto whitespace-pre-wrap break-all">
-              {prettyBody ?? bodyText}
+        <CollapsibleSection
+          title="Properties"
+          icon={<Tag className="w-3 h-3" />}
+          open={propsOpen}
+          onToggle={() => setPropsOpen(o => !o)}
+        >
+          <PropsList onLog={onLog} items={[
+            ["id",       entry.id],
+            ["time",     entry.timestamp],
+            ["profile",  entry.profile ?? null],
+            ["queue",    entry.address],
+            ["file",     entry.file_name],
+          ]} />
+        </CollapsibleSection>
+
+        {autoEntries.length > 0 && (
+          <CollapsibleSection
+            title={`Auto-set headers (${autoEntries.length})`}
+            icon={<Tag className="w-3 h-3" />}
+            open={autoOpen}
+            onToggle={() => setAutoOpen(o => !o)}
+          >
+            <PropsList onLog={onLog} items={autoEntries} />
+          </CollapsibleSection>
+        )}
+
+        <CollapsibleSection
+          title={`Custom properties (${Object.keys(entry.properties).length})`}
+          icon={<Tag className="w-3 h-3" />}
+          open={customOpen}
+          onToggle={() => setCustomOpen(o => !o)}
+        >
+          {hasProps
+            ? <PropsList onLog={onLog} items={Object.entries(entry.properties)} />
+            : <p className="text-[11px] text-t-ink5">— none —</p>
+          }
+        </CollapsibleSection>
+
+        {!entry.is_file && (
+          <CollapsibleSection
+            title="Body"
+            icon={<MessageSquare className="w-3 h-3" />}
+            open={bodyOpen}
+            onToggle={() => setBodyOpen(o => !o)}
+            action={
+              <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center bg-t-card border border-t-line rounded overflow-hidden">
+                  {(["auto", "raw", "hex"] as const).map(m => (
+                    <button
+                      key={m}
+                      onClick={(e) => { e.stopPropagation(); setBodyMode(m); }}
+                      className={`px-1.5 py-0.5 text-[10px] font-mono uppercase transition-colors ${
+                        bodyMode === m ? "bg-blue-500/15 text-blue-500" : "text-t-ink4 hover:text-t-ink2 hover:bg-t-hover"
+                      }`}
+                      title={
+                        m === "auto" ? `Auto (${detected})` :
+                        m === "raw"  ? "Raw text" : "Hex dump"
+                      }
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                {bodyText && (
+                  <button onClick={(e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(bodyText);
+                    onLog("info", "Body copied");
+                  }}
+                    className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover">
+                    <Copy className="w-3 h-3" /> Copy
+                  </button>
+                )}
+              </div>
+            }
+          >
+            <pre className="text-[11px] text-t-ink2 font-mono bg-t-field border border-t-line rounded-md p-2.5 overflow-x-auto whitespace-pre break-all max-h-80 overflow-y-auto select-text">
+              {bodyContent ?? <em className="text-t-ink5">no body</em>}
             </pre>
-          </div>
-        ) : (
-          <div>
-            <p className="text-[10px] uppercase tracking-wider text-t-ink5 font-semibold mb-1.5 flex items-center gap-1">
-              <FileText className="w-3 h-3" /> Body (binary)
-            </p>
-            <p className="text-[11px] text-t-ink3 px-2.5">
-              File: <span className="font-mono text-t-ink2">{entry.file_name}</span>
-              <span className={`ml-2 ${entry.file_data_b64 ? "text-green-500" : "text-t-ink5"}`}>
-                {entry.file_data_b64 ? "· content stored — can resend" : "· content not retained"}
-              </span>
-            </p>
-          </div>
+          </CollapsibleSection>
         )}
       </div>
     </div>

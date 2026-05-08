@@ -50,3 +50,6 @@ pnpm-debug.log*
 
 # ── Local user data (just in case it gets symlinked) ─────
 .amqpush/
+
+# Local Claude Code settings
+.claude/

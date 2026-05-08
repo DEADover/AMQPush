@@ -34,13 +34,14 @@ dependencies = [
 
 [[package]]
 name = "amqpush"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
  "fe2o3-amqp",
  "fe2o3-amqp-types",
+ "native-tls",
  "serde",
  "serde_json",
  "tauri",
@@ -48,6 +49,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tokio",
+ "tokio-native-tls",
  "uuid",
 ]
 

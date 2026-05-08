@@ -6,7 +6,6 @@ interface Props {
   onChange: (v: View) => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  msgCount?: number;
 }
 
 const ITEMS: { id: View; icon: React.ReactNode; label: string; kbd?: string }[] = [
@@ -21,15 +20,14 @@ const ITEMS: { id: View; icon: React.ReactNode; label: string; kbd?: string }[] 
 
 const TRANSITION = "transition-[width,opacity] duration-200 ease-out";
 
-export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed, msgCount }: Props) {
+export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed }: Props) {
   return (
     <nav className={`shrink-0 flex flex-col bg-t-panel border-r border-t-line py-2 overflow-hidden ${TRANSITION} ${
       collapsed ? "w-12" : "w-44"
     }`}>
       <div className="flex-1 flex flex-col gap-0.5 px-1.5">
         {ITEMS.map(item => {
-          const isActive   = active === item.id;
-          const badgeCount = item.id === "subscriber" ? msgCount : undefined;
+          const isActive = active === item.id;
 
           return (
             <button
@@ -58,13 +56,6 @@ export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed
                   collapsed ? "opacity-0" : (isActive ? "text-blue-200" : "text-t-ink5")
                 }`}>
                   {item.kbd}
-                </span>
-              )}
-
-              {/* Badge — absolute, visible in both modes (top-right corner of icon area) */}
-              {badgeCount !== undefined && badgeCount > 0 && (
-                <span className="absolute top-0 left-7 min-w-4 h-4 px-1 text-[10px] font-bold rounded-full flex items-center justify-center bg-green-500 text-black shadow-sm">
-                  {badgeCount > 99 ? "99+" : badgeCount}
                 </span>
               )}
 

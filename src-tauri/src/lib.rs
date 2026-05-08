@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use fe2o3_amqp::{Connection, Receiver, Session};
+use fe2o3_amqp::{Receiver, Session};
 
 mod amqp;
 mod broker;
@@ -20,7 +20,10 @@ use templates::Template;
 
 pub struct AppState {
     client: Arc<Mutex<AmqpClient>>,
-    sub: Arc<Mutex<Option<SubscriberHandle>>>,
+    /// Active subscriber tasks keyed by queue address. Multiple queues can be
+    /// listened to concurrently; messages from all of them go through the
+    /// shared `message_received` event tagged with `queue`.
+    subs: Arc<Mutex<HashMap<String, SubscriberHandle>>>,
     history: Arc<Mutex<Vec<HistoryEntry>>>,
     /// Persistent management channel — opened lazily on first list_broker_queues
     /// call, reused across polls. Closed on disconnect.
@@ -43,6 +46,7 @@ async fn connect(
     heartbeat_secs: Option<u32>,
     connect_timeout_secs: Option<u32>,
     sasl_anonymous: Option<bool>,
+    tls_skip_verify: Option<bool>,
 ) -> Result<(), String> {
     let mut client = state.client.lock().await;
     client
@@ -57,18 +61,17 @@ async fn connect(
             heartbeat_secs.unwrap_or(0),
             connect_timeout_secs.unwrap_or(10),
             sasl_anonymous.unwrap_or(false),
+            tls_skip_verify.unwrap_or(false),
         )
         .await
 }
 
 #[tauri::command]
 async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    // Stop subscriber if running
+    // Stop all subscribers if running
     {
-        let mut sub = state.sub.lock().await;
-        if let Some(h) = sub.take() {
-            h.stop();
-        }
+        let mut subs = state.subs.lock().await;
+        for (_, h) in subs.drain() { h.stop(); }
     }
     // Close management channel cleanly
     {
@@ -172,7 +175,12 @@ async fn start_subscriber(
     state: tauri::State<'_, AppState>,
     address: String,
 ) -> Result<(), String> {
-    let (host, port, username, password, use_tls) = {
+    let addr = address.trim().to_string();
+    if addr.is_empty() {
+        return Err("Queue address is required".into());
+    }
+
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected to broker".into());
@@ -183,26 +191,50 @@ async fn start_subscriber(
             client.username.clone(),
             client.password.clone(),
             client.use_tls,
+            client.tls_skip_verify,
         )
     };
 
-    let handle =
-        subscriber::start(&host, port, address, &username, &password, use_tls, app).await?;
+    // Reject duplicate subscriptions — surface a clear error rather than
+    // silently replacing an existing receiver.
+    {
+        let subs = state.subs.lock().await;
+        if subs.contains_key(&addr) {
+            return Err(format!("Already subscribed to '{addr}'"));
+        }
+    }
 
-    let mut sub = state.sub.lock().await;
-    if let Some(old) = sub.replace(handle) {
-        old.stop();
+    let handle =
+        subscriber::start(&host, port, addr.clone(), &username, &password, use_tls, tls_skip_verify, app).await?;
+
+    let mut subs = state.subs.lock().await;
+    subs.insert(addr, handle);
+    Ok(())
+}
+
+/// Stop a subscriber. If `address` is `Some`, stop only that one; otherwise
+/// stop all active subscribers.
+#[tauri::command]
+async fn stop_subscriber(
+    state: tauri::State<'_, AppState>,
+    address: Option<String>,
+) -> Result<(), String> {
+    let mut subs = state.subs.lock().await;
+    if let Some(addr) = address {
+        if let Some(h) = subs.remove(&addr) {
+            h.stop();
+        }
+    } else {
+        for (_, h) in subs.drain() { h.stop(); }
     }
     Ok(())
 }
 
+/// List addresses currently being subscribed to.
 #[tauri::command]
-async fn stop_subscriber(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut sub = state.sub.lock().await;
-    if let Some(h) = sub.take() {
-        h.stop();
-    }
-    Ok(())
+async fn list_subscribers(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
+    let subs = state.subs.lock().await;
+    Ok(subs.keys().cloned().collect())
 }
 
 // ── history ───────────────────────────────────────────────────────────────────
@@ -290,7 +322,7 @@ async fn verify_queue(
 
 #[tauri::command]
 async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<BrokerQueue>, String> {
-    let (host, port, username, password, use_tls) = {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -301,6 +333,7 @@ async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<Bro
             client.username.clone(),
             client.password.clone(),
             client.use_tls,
+            client.tls_skip_verify,
         )
     };
 
@@ -308,7 +341,7 @@ async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<Bro
 
     // Lazily open the management channel on first use
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
         *mgmt_guard = Some(chan);
     }
 
@@ -333,7 +366,7 @@ async fn peek_messages(
     max: u32,
     timeout_ms: u64,
 ) -> Result<Vec<PeekedMessage>, String> {
-    let (host, port, username, password, use_tls) = {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -344,9 +377,10 @@ async fn peek_messages(
             client.username.clone(),
             client.password.clone(),
             client.use_tls,
+            client.tls_skip_verify,
         )
     };
-    broker::peek_messages(&host, port, &username, &password, use_tls, &queue, max, timeout_ms)
+    broker::peek_messages(&host, port, &username, &password, use_tls, tls_skip_verify, &queue, max, timeout_ms)
         .await
 }
 
@@ -358,24 +392,22 @@ async fn await_reply(
     address: String,
     timeout_ms: u64,
 ) -> Result<Option<String>, String> {
-    let (host, port, username, password, use_tls) = {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
         }
-        (client.host.clone(), client.port, client.username.clone(), client.password.clone(), client.use_tls)
+        (client.host.clone(), client.port, client.username.clone(), client.password.clone(), client.use_tls, client.tls_skip_verify)
     };
 
-    let scheme = if use_tls { "amqps" } else { "amqp" };
-    let url = if !username.is_empty() {
-        format!("{scheme}://{username}:{password}@{host}:{port}")
-    } else {
-        format!("{scheme}://{host}:{port}")
-    };
+    let mut connection = amqp::open_connection(
+        &host, port, &username, &password,
+        use_tls, tls_skip_verify,
+        "amqpush-reply", false, 0,
+    )
+    .await
+    .map_err(|e| format!("Reply conn failed: {e}"))?;
 
-    let mut connection = Connection::open("amqpush-reply", &*url)
-        .await
-        .map_err(|e| format!("Reply conn failed: {e}"))?;
     let mut session = Session::begin(&mut connection)
         .await
         .map_err(|e| format!("Reply session failed: {e}"))?;
@@ -450,7 +482,7 @@ async fn export_history(
 pub fn run() {
     let state = AppState {
         client: Arc::new(Mutex::new(AmqpClient::new())),
-        sub: Arc::new(Mutex::new(None)),
+        subs: Arc::new(Mutex::new(HashMap::new())),
         history: Arc::new(Mutex::new(history_store::load())),
         mgmt: Arc::new(Mutex::new(None)),
     };
@@ -466,6 +498,7 @@ pub fn run() {
             send_message,
             start_subscriber,
             stop_subscriber,
+            list_subscribers,
             get_history,
             clear_history,
             get_profiles,

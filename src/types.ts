@@ -35,11 +35,49 @@ export interface HistoryEntry {
   auto_properties: Record<string, string>;
 }
 
+/** Full AMQP metadata extracted from a delivery — mirrors Rust `PeekedMessage`. */
+export interface MessageMeta {
+  message_id: string | null;
+  user_id: string | null;
+  to: string | null;
+  subject: string | null;
+  reply_to: string | null;
+  correlation_id: string | null;
+  content_type: string | null;
+  content_encoding: string | null;
+  absolute_expiry_time: number | null;
+  creation_time: number | null;
+  group_id: string | null;
+  group_sequence: number | null;
+  reply_to_group_id: string | null;
+  application_properties: Record<string, string>;
+  body_text: string | null;
+  body_kind: string;
+  body_size: number;
+  priority: number | null;
+  durable: boolean | null;
+  ttl_ms: number | null;
+  delivery_count: number;
+}
+
 export interface ReceivedMessage {
+  /** UUID generated on receive — used as React key. */
   id: string;
-  body: string;
+  /** HH:MM:SS at receive time. */
   timestamp: string;
+  /** Truncated body text for compact list display. */
+  body: string;
   is_truncated: boolean;
+  /** Full extracted AMQP metadata. */
+  meta: MessageMeta;
+  /** Queue (source address) this message arrived on. */
+  queue: string;
+}
+
+/** Per-queue subscriber lifecycle event — for reconnecting/reconnected/error/stopped. */
+export interface SubEvent {
+  queue: string;
+  message: string | null;
 }
 
 export interface LogEntry {

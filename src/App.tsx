@@ -36,7 +36,6 @@ export default function App() {
   const [prevView,       setPrevView]       = useState<View>("publisher");
   const [connected,      setConnected]      = useState(false);
   const [defaultAddress, setDefaultAddress] = useState("test_queue");
-  const [msgCount,       setMsgCount]       = useState(0);
   // Logs persist across restarts via localStorage (last 500 entries).
   const [logs, setLogs] = useState<LogEntry[]>(() => {
     try {
@@ -58,6 +57,8 @@ export default function App() {
     fileName?: string;
     fileDataB64?: string;
     properties?: Record<string, string>;
+    /** Pre-fill standard AMQP correlation-id (used by Reply flow). */
+    correlationId?: string;
     nonce: number;
   } | null>(null);
   const [pendingSubAddr, setPendingSubAddr] = useState<{ address: string; nonce: number } | null>(null);
@@ -145,13 +146,14 @@ export default function App() {
   }, [view, prevView]);
 
   function handleConnected(addr: string) { setConnected(true); setDefaultAddress(addr); setStats(emptyStats()); }
-  function handleResend(arg: { address: string; body?: string; fileName?: string; fileDataB64?: string; properties?: Record<string, string> }) {
+  function handleResend(arg: { address: string; body?: string; fileName?: string; fileDataB64?: string; properties?: Record<string, string>; correlationId?: string }) {
     setResendPayload({
       address: arg.address,
       body: arg.body ?? "",
       fileName: arg.fileName,
       fileDataB64: arg.fileDataB64,
       properties: arg.properties,
+      correlationId: arg.correlationId,
       nonce: Date.now(),
     });
     changeView("publisher");
@@ -273,8 +275,8 @@ export default function App() {
       defaultAddress={defaultAddress}
       pendingAddress={pendingSubAddr}
       onLog={addLog}
-      onMessageCountChange={setMsgCount}
       onMessageReceived={trackReceived}
+      onReply={handleResend}
     />
   );
 
@@ -418,7 +420,6 @@ export default function App() {
           onChange={changeView}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={() => setSidebarCollapsed(c => !c)}
-          msgCount={msgCount}
         />
 
         <div className="flex flex-col flex-1 min-w-0 min-h-0">

@@ -14,14 +14,14 @@ them, manage multiple connection profiles, and inspect every message header.
 
 | Area | Capabilities |
 |---|---|
-| **Connection** | Multiple saved profiles · auto-connect to last-used on startup · TLS / AMQPS · idle heartbeat · connect timeout · custom Container ID · SASL ANONYMOUS toggle |
+| **Connection** | Multiple saved profiles · auto-connect to last-used on startup · TLS / AMQPS with optional **skip-cert-verify** for self-signed brokers · idle heartbeat · connect timeout · custom Container ID · SASL ANONYMOUS toggle · transparent **auto-reopen on dead session** (broker idle timeout / network blip) |
 | **Send** | JSON / XML / plain text with live validator and Beautify · binary file send · custom properties (key/value/description table) · user-defined `{{variables}}` · batch send (repeat × delay) · request-reply round-trip with timeout · saved templates |
-| **Receive** | Live subscriber with auto-reconnect (exponential backoff) · regex/text filter · OS notifications when window unfocused · auto-scroll toggle |
-| **Browser** | Live queue list from broker (Artemis / ActiveMQ Classic) with auto-refresh every 2.5 s · sortable table · message peek (read & release back) · full AMQP property inspection per message |
-| **History** | Persisted send log (200 last entries) · Outlook-style split layout (list + preview) · Resend including file attachments · search by ID / profile / queue / body · JSON / CSV export |
+| **Receive** | **Multi-queue subscribe** — listen to several queues at once with per-queue chips and reconnect indicators · split-pane list + preview (full AMQP metadata, hover-Copy on every property) · **Reply** button auto-fills target/correlation-id · **Pause/Resume** without dropping the link · **Highlight rules** (regex → colour tag, persisted) · **Body viewer** with `AUTO\|RAW\|HEX` (JSON pretty, XML pretty, hex+ASCII dump) · session stats (msg/s, total bytes, avg size, duration) · regex filter across body / id / content-type / app-properties · **Diff** between any two messages (line-level LCS over body + property delta) · **Persist** received messages across restarts (opt-in, last 500) · CSV / JSON export · OS notifications when window unfocused · auto-reconnect with exponential backoff |
+| **Browser** | Live queue list from broker (Artemis / ActiveMQ Classic) with auto-refresh every 2.5 s · sortable table · message peek (read & release back) · full AMQP property inspection per message · `AUTO\|RAW\|HEX` body viewer · hover-Copy on every property |
+| **History** | Persisted send log (200 last entries) · Outlook-style split layout (list + preview) · collapsible sections (Properties / Auto-set / Custom / Body) · `AUTO\|RAW\|HEX` body viewer · Resend including file attachments · search by ID / profile / queue / body · JSON / CSV export |
 | **Stats** | Throughput sparklines (60 s rolling) · per-queue leaderboard · message-size distribution · content-type breakdown · reliability score · peak rates |
 | **Logs** | In-app console with level filter · search · auto-scroll · persists across restarts |
-| **UI** | Postman-style tabs · light / dark / system theme · collapsible sidebar with smooth animation · global profile switcher in header · text-selectable preview panes |
+| **UI** | Postman-style tabs · light / dark / system theme · collapsible sidebar with smooth animation · global profile switcher in header · unified design tokens across Browser / Receive / History · text-selectable preview panes |
 
 ---
 
@@ -154,12 +154,23 @@ Logs and UI preferences live in WebView `localStorage`.
                                       └──────────────┘
 ```
 
-- The Rust backend keeps a single long-lived `Connection`/`Session` and a per-address
-  cache of `Sender` links. A separate persistent `ManagementChannel` is used for
-  Artemis management RPC (queue list / metrics) so polling doesn't churn sessions.
-- The frontend uses Tauri events for live receive (`message_received`,
-  `subscriber_reconnecting`, `subscriber_reconnected`, `subscriber_error`).
+- The Rust backend keeps a single long-lived `Connection`/`Session` for the publisher
+  with a per-address cache of `Sender` links. On dead-session errors (`Illegal session
+  state`, broker idle timeout) it transparently re-opens and retries the send once —
+  the user never has to manually reconnect.
+- A separate persistent `ManagementChannel` is used for Artemis management RPC (queue
+  list / metrics) so polling doesn't churn sessions or trigger DLQ spam from
+  `SESSION_CLOSED` notifications.
+- Multi-queue subscriber: each subscribed queue is its own `tokio` task with an
+  independent connection and reconnect loop. Messages from all queues flow through one
+  `message_received` event tagged with `queue` so the UI can render a mixed feed.
+- The frontend uses Tauri events: `message_received`, plus per-queue lifecycle events
+  `subscriber_reconnecting` / `subscriber_reconnected` / `subscriber_error` /
+  `subscriber_stopped`, each carrying a `{queue, message?}` payload.
 - All views remain mounted between switches — state is preserved without prop drilling.
+- Shared UI primitives live under `src/components/` (`CollapsibleSection`, `PropsList`,
+  `EmptyState`) and `src/utils/` (`format`, `bodyView`) so the three split-pane views
+  stay visually cohesive.
 
 ---
 
@@ -185,6 +196,12 @@ PRs welcome. Run formatters before committing:
 npx tsc --noEmit                    # type-check the frontend
 ( cd src-tauri && cargo build )     # build the Rust side
 ```
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
 ---
 

@@ -58,6 +58,102 @@ pub struct AmqpClient {
     pub username: String,
     pub password: String,
     pub use_tls: bool,
+    pub tls_skip_verify: bool,
+    /// Stored so `reopen()` can re-establish the connection with the same
+    /// settings if the session dies (e.g. after broker idle timeout).
+    container_id: String,
+    sasl_anonymous: bool,
+    heartbeat_secs: u32,
+}
+
+/// Heuristic detection of "session/connection got reset" errors from
+/// fe2o3-amqp. When a publisher hits one of these we transparently reopen
+/// the connection and retry once, instead of forcing the user to reconnect.
+fn is_retryable_disconnect_err(s: &str) -> bool {
+    let s = s.to_ascii_lowercase();
+    s.contains("illegal session state")
+        || s.contains("session might have stopped")
+        || s.contains("session has ended")
+        || s.contains("connection has stopped")
+        || s.contains("connection might have stopped")
+        || s.contains("connection ended")
+        || s.contains("link has detached")
+        || s.contains("link is detached")
+        || s.contains("idle timeout")
+        || s.contains("connection closed")
+        || s.contains("not connected")
+}
+
+/// Open a connection to the broker with all the knobs: TLS (with optional
+/// certificate-check bypass for self-signed brokers), heartbeat, SASL Plain
+/// or Anonymous, custom container ID. Used by every module that needs to
+/// open its own AMQP session — keeps the auth/TLS code in one place.
+#[allow(clippy::too_many_arguments)]
+pub async fn open_connection(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    use_tls: bool,
+    tls_skip_verify: bool,
+    container_id: &str,
+    sasl_anonymous: bool,
+    heartbeat_secs: u32,
+) -> Result<ConnectionHandle<()>, String> {
+    use fe2o3_amqp::sasl_profile::SaslProfile;
+
+    let mut builder = Connection::builder().container_id(container_id);
+    if heartbeat_secs > 0 {
+        builder = builder.idle_time_out(heartbeat_secs * 1000);
+    }
+
+    // Configure SASL Plain only when creds present and ANONYMOUS not forced.
+    // Otherwise fe2o3-amqp will negotiate ANONYMOUS automatically.
+    if !username.is_empty() && !sasl_anonymous {
+        builder = builder.sasl_profile(SaslProfile::Plain {
+            username: username.into(),
+            password: password.into(),
+        });
+    }
+
+    if use_tls {
+        // Manual TLS path — lets us configure cert verification on/off.
+        let mut tls_builder = native_tls::TlsConnector::builder();
+        if tls_skip_verify {
+            tls_builder
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true);
+        }
+        let tls = tls_builder
+            .build()
+            .map_err(|e| format!("TLS connector init: {e}"))?;
+        let async_tls = tokio_native_tls::TlsConnector::from(tls);
+
+        let tcp = tokio::net::TcpStream::connect(format!("{host}:{port}"))
+            .await
+            .map_err(|e| format!("TCP connect: {e}"))?;
+        let tls_stream = async_tls
+            .connect(host, tcp)
+            .await
+            .map_err(|e| format!("TLS handshake: {e}"))?;
+
+        builder
+            .hostname(host)
+            .open_with_stream(tls_stream)
+            .await
+            .map_err(|e| format!("AMQP open: {e}"))
+    } else {
+        // Plain TCP path. Use a credential-free URL — auth comes from the
+        // explicit SaslProfile set above. Embedding `user:pass@` in the URL
+        // would force percent-encoding of any special chars in the password
+        // (`@`, `:`, `/`, `#`, `?`, etc.); the explicit profile takes raw
+        // bytes and handles them correctly.
+        let url = format!("amqp://{host}:{port}");
+        builder
+            .open(&*url)
+            .await
+            .map_err(|e| format!("AMQP open: {e}"))
+    }
 }
 
 impl AmqpClient {
@@ -72,6 +168,10 @@ impl AmqpClient {
             username: String::new(),
             password: String::new(),
             use_tls: false,
+            tls_skip_verify: false,
+            container_id: String::new(),
+            sasl_anonymous: false,
+            heartbeat_secs: 0,
         }
     }
 
@@ -88,16 +188,9 @@ impl AmqpClient {
         heartbeat_secs: u32,
         connect_timeout_secs: u32,
         sasl_anonymous: bool,
+        tls_skip_verify: bool,
     ) -> Result<(), String> {
         self.disconnect().await.ok();
-
-        let scheme = if use_tls { "amqps" } else { "amqp" };
-        let creds_in_url = !username.is_empty() && !sasl_anonymous;
-        let url = if creds_in_url {
-            format!("{scheme}://{username}:{password}@{host}:{port}")
-        } else {
-            format!("{scheme}://{host}:{port}")
-        };
 
         let cid_owned;
         let cid: &str = if container_id.is_empty() {
@@ -107,15 +200,12 @@ impl AmqpClient {
             container_id
         };
 
-        // Build connection with optional idle-timeout (heartbeat).
-        let mut builder = Connection::builder().container_id(cid);
-        if heartbeat_secs > 0 {
-            // idle_time_out is in milliseconds
-            builder = builder.idle_time_out(heartbeat_secs * 1000);
-        }
-
         // Apply optional connect timeout
-        let connect_fut = builder.open(&*url);
+        let connect_fut = open_connection(
+            host, port, username, password,
+            use_tls, tls_skip_verify,
+            cid, sasl_anonymous, heartbeat_secs,
+        );
         let mut connection = if connect_timeout_secs > 0 {
             tokio::time::timeout(
                 std::time::Duration::from_secs(connect_timeout_secs as u64),
@@ -150,7 +240,48 @@ impl AmqpClient {
         self.username = username.to_string();
         self.password = password.to_string();
         self.use_tls = use_tls;
+        self.tls_skip_verify = tls_skip_verify;
+        self.container_id = cid.to_string();
+        self.sasl_anonymous = sasl_anonymous;
+        self.heartbeat_secs = heartbeat_secs;
 
+        Ok(())
+    }
+
+    /// Re-establish connection + session using the same settings as the last
+    /// successful `connect()`. Drops any cached senders since they belong to
+    /// the dead session. Used after a transparent retry on session-dead errors.
+    async fn reopen(&mut self) -> Result<(), String> {
+        // Best-effort cleanup of dead handles
+        for (_, s) in self.senders.drain() {
+            let _ = s.close().await;
+        }
+        if let Some(mut s) = self.session.take() { let _ = s.end().await; }
+        if let Some(mut c) = self.connection.take() { let _ = c.close().await; }
+
+        if self.host.is_empty() {
+            return Err("Cannot reopen — never connected".into());
+        }
+
+        // Use a fresh container_id so the broker doesn't think we're the
+        // ghost of the previous (possibly half-dead) connection.
+        let new_cid = format!("amqpush-{}", uuid::Uuid::new_v4());
+
+        let mut connection = open_connection(
+            &self.host, self.port, &self.username, &self.password,
+            self.use_tls, self.tls_skip_verify,
+            &new_cid, self.sasl_anonymous, self.heartbeat_secs,
+        )
+        .await
+        .map_err(|e| format!("Reopen connection: {e}"))?;
+
+        let session = Session::begin(&mut connection)
+            .await
+            .map_err(|e| format!("Reopen session: {e}"))?;
+
+        self.connection = Some(connection);
+        self.session = Some(session);
+        self.container_id = new_cid;
         Ok(())
     }
 
@@ -175,7 +306,7 @@ impl AmqpClient {
         custom_props: HashMap<String, String>,
         reply_to: Option<String>,
     ) -> Result<SendResult, String> {
-        if self.session.is_none() {
+        if self.host.is_empty() {
             return Err("Not connected".into());
         }
 
@@ -184,69 +315,24 @@ impl AmqpClient {
         let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
         let creation_ms = now.timestamp_millis();
 
-        let mut props: OrderedMap<String, SimpleValue> = OrderedMap::new();
-
-        if let Some(ref name) = file_name {
-            props.insert("file_name".into(), SimpleValue::String(name.clone()));
-            props.insert("is_file".into(), SimpleValue::Bool(true));
-        } else {
-            props.insert("is_file".into(), SimpleValue::Bool(false));
-        }
-
-        // Tag the message as ANYCAST routing — Artemis uses _AMQ_ROUTING_TYPE
-        // to distinguish queue-style (1) vs topic-style (2) delivery. Without
-        // this header Artemis assumes the address default; setting it explicitly
-        // makes our messages indistinguishable from FESB-originated ones.
-        props.insert(
-            "_AMQ_ROUTING_TYPE".into(),
-            SimpleValue::Byte(1),
-        );
-
-        for (k, v) in &custom_props {
-            props.insert(k.clone(), SimpleValue::String(v.clone()));
-        }
-
-        let app_props = ApplicationProperties(props);
-
-        // AMQP standard Properties — set message_id, creation_time and reply_to
-        // so the message presents JMS-style metadata when inspected by FESB or
-        // any other AMQP-aware management UI.
-        let msg_props = Some(Properties {
-            message_id: Some(fe2o3_amqp_types::messaging::MessageId::String(msg_id.clone().into())),
-            creation_time: Some(Timestamp::from_milliseconds(creation_ms)),
-            reply_to: reply_to.map(|s| s.into()),
-            ..Default::default()
-        });
-
-        // Standard JMS-style header: durable=false, priority=4 (Artemis default).
-        let msg_header = Some(Header {
-            durable: false,
-            priority: Priority(4),
-            ..Default::default()
-        });
-
-        // We need to get the sender separately to avoid borrow conflict
-        let addr = address.to_string();
-        self.get_or_create_sender(&addr).await?;
-        let sender = self.senders.get_mut(&addr).unwrap();
-
-        if let Some(body) = text {
-            let mut builder = Message::builder().application_properties(app_props);
-            if let Some(h) = msg_header.clone() { builder = builder.header(h); }
-            if let Some(p) = msg_props.clone()  { builder = builder.properties(p); }
-            let msg = builder.value(body).build();
-            sender.send(msg).await.map_err(|e| format!("Send failed: {e}"))?;
-        } else if let Some(b64) = file_data_b64 {
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&b64)
-                .map_err(|e| format!("Base64: {e}"))?;
-            let mut builder = Message::builder().application_properties(app_props);
-            if let Some(h) = msg_header.clone() { builder = builder.header(h); }
-            if let Some(p) = msg_props.clone()  { builder = builder.properties(p); }
-            let msg = builder.data(bytes).build();
-            sender.send(msg).await.map_err(|e| format!("Send failed: {e}"))?;
-        } else {
-            return Err("No body provided".into());
+        // Try once. If we hit a session/connection-dead error, transparently
+        // reopen the connection and retry once. This handles cases where the
+        // broker dropped the connection (idle timeout, restart, network blip).
+        match self.try_send_once(
+            address, &text, &file_name, file_data_b64.as_deref(),
+            &custom_props, &reply_to, &msg_id, creation_ms,
+        ).await {
+            Ok(()) => {}
+            Err(e) if is_retryable_disconnect_err(&e) => {
+                eprintln!("amqp: send hit retryable error '{e}' — reopening session and retrying");
+                self.reopen().await
+                    .map_err(|re| format!("Send failed: {e}; reopen failed: {re}"))?;
+                self.try_send_once(
+                    address, &text, &file_name, file_data_b64.as_deref(),
+                    &custom_props, &reply_to, &msg_id, creation_ms,
+                ).await?;
+            }
+            Err(e) => return Err(e),
         }
 
         Ok(SendResult {
@@ -254,6 +340,75 @@ impl AmqpClient {
             timestamp: ts,
             address: address.to_string(),
         })
+    }
+
+    /// Single send attempt. All inputs by reference so it can be called twice
+    /// (once for original attempt, once after `reopen()` on retryable errors)
+    /// without consuming the caller's owned values.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_send_once(
+        &mut self,
+        address: &str,
+        text: &Option<String>,
+        file_name: &Option<String>,
+        file_data_b64: Option<&str>,
+        custom_props: &HashMap<String, String>,
+        reply_to: &Option<String>,
+        msg_id: &str,
+        creation_ms: i64,
+    ) -> Result<(), String> {
+        let mut props: OrderedMap<String, SimpleValue> = OrderedMap::new();
+        if let Some(name) = file_name {
+            props.insert("file_name".into(), SimpleValue::String(name.clone()));
+            props.insert("is_file".into(), SimpleValue::Bool(true));
+        } else {
+            props.insert("is_file".into(), SimpleValue::Bool(false));
+        }
+        // Tag the message as ANYCAST routing — Artemis uses _AMQ_ROUTING_TYPE
+        // to distinguish queue-style (1) vs topic-style (2) delivery.
+        props.insert("_AMQ_ROUTING_TYPE".into(), SimpleValue::Byte(1));
+        for (k, v) in custom_props {
+            props.insert(k.clone(), SimpleValue::String(v.clone()));
+        }
+        let app_props = ApplicationProperties(props);
+
+        let msg_props = Some(Properties {
+            message_id: Some(fe2o3_amqp_types::messaging::MessageId::String(msg_id.to_string().into())),
+            creation_time: Some(Timestamp::from_milliseconds(creation_ms)),
+            reply_to: reply_to.clone().map(|s| s.into()),
+            ..Default::default()
+        });
+
+        let msg_header = Some(Header {
+            durable: false,
+            priority: Priority(4),
+            ..Default::default()
+        });
+
+        let addr = address.to_string();
+        self.get_or_create_sender(&addr).await?;
+        let sender = self.senders.get_mut(&addr).unwrap();
+
+        if let Some(body) = text {
+            let mut builder = Message::builder().application_properties(app_props);
+            if let Some(h) = msg_header { builder = builder.header(h); }
+            if let Some(p) = msg_props  { builder = builder.properties(p); }
+            let msg = builder.value(body.clone()).build();
+            sender.send(msg).await.map_err(|e| format!("Send failed: {e}"))?;
+        } else if let Some(b64) = file_data_b64 {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("Base64: {e}"))?;
+            let mut builder = Message::builder().application_properties(app_props);
+            if let Some(h) = msg_header { builder = builder.header(h); }
+            if let Some(p) = msg_props  { builder = builder.properties(p); }
+            let msg = builder.data(bytes).build();
+            sender.send(msg).await.map_err(|e| format!("Send failed: {e}"))?;
+        } else {
+            return Err("No body provided".into());
+        }
+
+        Ok(())
     }
 
     pub async fn disconnect(&mut self) -> Result<(), String> {

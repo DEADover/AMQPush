@@ -13,7 +13,7 @@ use fe2o3_amqp::connection::ConnectionHandle;
 use fe2o3_amqp::session::SessionHandle;
 use fe2o3_amqp::{
     link::{ReceiverAttachError, SenderAttachError},
-    Connection, Delivery, Receiver, Sender, Session,
+    Delivery, Receiver, Sender, Session,
 };
 use fe2o3_amqp_types::messaging::{
     AmqpValue, ApplicationProperties, Body, Message, Modified, Properties, Source,
@@ -93,17 +93,16 @@ impl ManagementChannel {
         username: &str,
         password: &str,
         use_tls: bool,
+        tls_skip_verify: bool,
     ) -> Result<Self, String> {
-        let scheme = if use_tls { "amqps" } else { "amqp" };
-        let url = if !username.is_empty() {
-            format!("{scheme}://{username}:{password}@{host}:{port}")
-        } else {
-            format!("{scheme}://{host}:{port}")
-        };
+        let mut connection = crate::amqp::open_connection(
+            host, port, username, password,
+            use_tls, tls_skip_verify,
+            "amqpush-mgmt", false, 0,
+        )
+        .await
+        .map_err(|e| format!("Open conn: {e}"))?;
 
-        let mut connection = Connection::open("amqpush-mgmt", &*url)
-            .await
-            .map_err(|e| format!("Open conn: {e}"))?;
         let mut session = Session::begin(&mut connection)
             .await
             .map_err(|e| format!("Begin session: {e}"))?;
@@ -378,20 +377,19 @@ pub async fn peek_messages(
     username: &str,
     password: &str,
     use_tls: bool,
+    tls_skip_verify: bool,
     queue: &str,
     max: u32,
     per_message_timeout_ms: u64,
 ) -> Result<Vec<PeekedMessage>, String> {
-    let scheme = if use_tls { "amqps" } else { "amqp" };
-    let url = if !username.is_empty() {
-        format!("{scheme}://{username}:{password}@{host}:{port}")
-    } else {
-        format!("{scheme}://{host}:{port}")
-    };
+    let mut connection = crate::amqp::open_connection(
+        host, port, username, password,
+        use_tls, tls_skip_verify,
+        "amqpush-peek", false, 0,
+    )
+    .await
+    .map_err(|e| format!("Open conn: {e}"))?;
 
-    let mut connection = Connection::open("amqpush-peek", &*url)
-        .await
-        .map_err(|e| format!("Open conn: {e}"))?;
     let mut session = Session::begin(&mut connection)
         .await
         .map_err(|e| format!("Begin session: {e}"))?;
@@ -439,7 +437,7 @@ pub async fn peek_messages(
     Ok(out)
 }
 
-fn extract_peeked(delivery: &Delivery<Body<Value>>) -> PeekedMessage {
+pub(crate) fn extract_peeked(delivery: &Delivery<Body<Value>>) -> PeekedMessage {
     let msg = delivery.message();
 
     let header = msg.header.as_ref();
