@@ -3,7 +3,7 @@ import {
   X, Search, BookOpen, Plug, Send, Inbox, ListTree, History as HistoryIcon,
   BarChart3, Terminal, Keyboard, Sparkles, ShieldCheck, Braces, Code2,
   Repeat2, CornerDownLeft, BookMarked, Database, FileSpreadsheet, Filter,
-  AlertTriangle, Lightbulb,
+  AlertTriangle, Lightbulb, ChevronRight,
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -788,7 +788,34 @@ export default function HelpModal({
 }) {
   const [activeId, setActiveId] = useState(initialSection ?? SECTIONS[0].id);
   const [query, setQuery] = useState("");
+  /** Set of parent ids the user has explicitly collapsed. Default empty =
+   *  every parent shows its children. We track collapses (rather than
+   *  expansions) so a fresh install doesn't have to enumerate the parent
+   *  list, and adding a new parent later doesn't require a state migration. */
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
+
+  /** Lookup of parentId → child sections, ordered as they appear in SECTIONS.
+   *  Drives the chevron-on-parent rendering and the "has children" check. */
+  const childrenByParent = useMemo(() => {
+    const m = new Map<string, HelpSection[]>();
+    for (const s of SECTIONS) {
+      if (s.parentId) {
+        if (!m.has(s.parentId)) m.set(s.parentId, []);
+        m.get(s.parentId)!.push(s);
+      }
+    }
+    return m;
+  }, []);
+
+  function toggleCollapse(parentId: string) {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(parentId)) next.delete(parentId);
+      else next.add(parentId);
+      return next;
+    });
+  }
 
   // Esc to close
   useEffect(() => {
@@ -862,22 +889,66 @@ export default function HelpModal({
                 <div className="px-3 py-2 text-[12px] text-t-ink5">No matches</div>
               ) : filteredSections.map(s => {
                 const isChild = !!s.parentId;
+                const childList = childrenByParent.get(s.id) ?? [];
+                const hasChildren = childList.length > 0;
+                // Active section's parent is force-expanded so the chain to
+                // the highlighted entry is always visible. Search mode is also
+                // force-expanded — collapsed children would just hide matches.
+                const activeIsChildHere = hasChildren && childList.some(c => c.id === activeId);
+                const searching = !!query.trim();
+                const expanded = !collapsed.has(s.id) || activeIsChildHere || searching;
+
+                // Hide a child whose parent is collapsed (and the active /
+                // search overrides above don't apply).
+                if (isChild) {
+                  const parent = SECTIONS.find(p => p.id === s.parentId);
+                  const parentSearching = searching;
+                  const parentActive = parent && childrenByParent.get(parent.id)?.some(c => c.id === activeId);
+                  const parentExpanded = parent && (!collapsed.has(parent.id) || parentActive || parentSearching);
+                  if (!parentExpanded) return null;
+                }
+
                 return (
-                  <button
+                  <div
                     key={s.id}
-                    type="button"
-                    onClick={() => setActiveId(s.id)}
-                    className={`w-full flex items-center gap-2 ${isChild ? "pl-7 pr-3" : "px-3"} py-1.5 text-left text-[12px] transition-colors ${
-                      s.id === active.id
-                        ? "bg-blue-500/15 text-blue-500"
-                        : isChild
-                          ? "text-t-ink3 hover:bg-t-hover/50 hover:text-t-ink"
-                          : "text-t-ink2 hover:bg-t-hover/50 hover:text-t-ink"
-                    }`}
+                    className={`w-full flex items-stretch ${isChild ? "pl-4" : ""}`}
                   >
-                    <span className="shrink-0">{s.icon}</span>
-                    <span className="truncate">{s.title}</span>
-                  </button>
+                    {/* Section button — clicking activates and (for parents) does NOT toggle collapse */}
+                    <button
+                      type="button"
+                      onClick={() => setActiveId(s.id)}
+                      className={`flex-1 flex items-center gap-2 ${isChild ? "pl-3 pr-3" : "pl-3 pr-2"} py-1.5 text-left text-[12px] transition-colors ${
+                        s.id === active.id
+                          ? "bg-blue-500/15 text-blue-500"
+                          : isChild
+                            ? "text-t-ink3 hover:bg-t-hover/50 hover:text-t-ink"
+                            : "text-t-ink2 hover:bg-t-hover/50 hover:text-t-ink"
+                      }`}
+                    >
+                      <span className="shrink-0">{s.icon}</span>
+                      <span className="truncate">{s.title}</span>
+                    </button>
+                    {/* Chevron — only on parents with children. Decoupled from
+                        the activate-on-click target so users can collapse a
+                        section without leaving their current page. */}
+                    {hasChildren && (
+                      <button
+                        type="button"
+                        onClick={() => toggleCollapse(s.id)}
+                        aria-label={expanded ? `Collapse ${s.title}` : `Expand ${s.title}`}
+                        title={expanded ? "Collapse" : "Expand"}
+                        className={`shrink-0 px-2 transition-colors ${
+                          s.id === active.id
+                            ? "text-blue-500 hover:bg-blue-500/20"
+                            : "text-t-ink5 hover:text-t-ink hover:bg-t-hover/50"
+                        }`}
+                      >
+                        <ChevronRight
+                          className={`w-3.5 h-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
+                        />
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </div>
