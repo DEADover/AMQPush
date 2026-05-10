@@ -99,23 +99,34 @@ function typeIcon(group?: string): ReactNode {
 }
 
 export function AutocompletePopup({ items, activeIdx, onPick, onHover, className }: PopupProps) {
-  // Compute popup width directly from the longest row. CSS `width:
-  // max-content` was unreliable across layout contexts (rows in narrow
-  // grid cells stayed clamped), so we go the simpler route: find the
-  // widest `name + group` across the full list and translate to pixels.
-  // Monospace at 12 px → ≈ 7.2 px per char; +30 px covers the fixed
-  // padding (16 px) + icon column (1 ch ≈ 7 px) + margins (6 + 8 px).
-  // Using `ch` units lets the browser use the real font metric instead
-  // of our rough px estimate, so the popup is exact across fonts.
+  // Compute popup width by measuring the widest row's text directly via a
+  // throw-away canvas in the same font + size the popup renders in. The
+  // earlier `ch`-unit approach was off because system font fall-backs
+  // shifted `ch` away from the actual rendered glyph width (italic chars
+  // are also slightly wider). Canvas `measureText` gives us pixels for
+  // free — exact across whichever monospace the OS ends up using.
   const popupWidth = useMemo(() => {
-    let maxChars = 0;
+    if (items.length === 0) return MIN_WIDTH;
+    if (typeof document === "undefined") return MIN_WIDTH;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return MIN_WIDTH;
+    ctx.font = `${FONT_SIZE} ${FONT_FAMILY}`;
+
+    let maxPx = 0;
     for (const it of items) {
-      const w = it.name.length + (it.group?.length ?? 0);
-      if (w > maxChars) maxChars = w;
+      // Row composition: icon char + name + group. Marginspaces aren't
+      // included in measureText so we add them as a fixed pixel budget
+      // below.
+      const text = (it.group ? `c${it.name}${it.group}` : `c${it.name}`);
+      const w = ctx.measureText(text).width;
+      if (w > maxPx) maxPx = w;
     }
-    // +1 ch for the icon column; +30 px for paddings (8+8) + icon
-    // marginRight (6) + group marginLeft (8).
-    return `calc(${maxChars + 1}ch + 30px)`;
+    // Fixed budget: padding-left (8) + padding-right (8) + icon margin (6)
+    // + group margin (8) = 30 px, plus a small 6 px safety so italic
+    // overhang on the trailing group never clips.
+    const px = Math.ceil(maxPx + 30 + 6);
+    return `${Math.max(px, parseInt(MIN_WIDTH))}px`;
   }, [items]);
 
   if (items.length === 0) return null;
