@@ -67,7 +67,21 @@ const RAW_TYPE_CT:    Record<RawType, string | null> = {
   xml:  "application/xml",
 };
 
-let rowId = 0;
+/**
+ * Generate a unique numeric id for a Property / Variable / CSV row. We
+ * deliberately avoid a module-level `let counter = 0` because Vite's HMR
+ * resets module state on every reload while React preserves component
+ * state across the same reload — the combination produced id collisions
+ * after a few hot-reloads (two rows ending up with the same `key`),
+ * which React reconciled by merging their DOM nodes. Editing one input
+ * then mutated the other.
+ *
+ * Math.random over the safe-integer range gives ≈53 bits of entropy per
+ * id; collision probability across hundreds of rows is effectively zero.
+ */
+function newRowId(): number {
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
 
 function fmtBytes(b: number): string {
   if (b < 1024) return `${b} B`;
@@ -349,14 +363,14 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         // Skip correlation-id from resendPayload.properties since we set it
         // explicitly below (avoids duplicate row when Reply provides it).
         if (k === "correlation-id" && resendPayload.correlationId) continue;
-        propRows.push({ id: ++rowId, enabled: true, key: k, value: v, description: "" });
+        propRows.push({ id: newRowId(), enabled: true, key: k, value: v, description: "" });
       }
     }
     // Reply flow: pre-fill correlation-id as a custom property so the upstream
     // request-reply pattern keeps its tracking id.
     if (resendPayload.correlationId) {
       propRows.unshift({
-        id: ++rowId, enabled: true,
+        id: newRowId(), enabled: true,
         key: "correlation-id", value: resendPayload.correlationId,
         description: "From received message (reply)",
       });
@@ -372,7 +386,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     doSend();
   }, [sendTrigger]);
 
-  const addProp    = useCallback(() => { setProps(p => [...p, { id: ++rowId, enabled: true, key: "", value: "", description: "" }]); }, []);
+  const addProp    = useCallback(() => { setProps(p => [...p, { id: newRowId(), enabled: true, key: "", value: "", description: "" }]); }, []);
   const removeProp = useCallback((id: number) => setProps(p => p.filter(r => r.id !== id)), []);
   const updateProp = useCallback((id: number, f: keyof PropertyRow, v: string | boolean) =>
     setProps(p => p.map(r => r.id === id ? { ...r, [f]: v } : r)), []);
@@ -384,13 +398,13 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   const enabledPropsCount = props.filter(r => r.enabled !== false && r.key.trim()).length;
 
   // User variables CRUD
-  const addUserVar    = useCallback(() => { setUserVars(p => [...p, { id: ++rowId, enabled: true, key: "", value: "", description: "" }]); }, []);
+  const addUserVar    = useCallback(() => { setUserVars(p => [...p, { id: newRowId(), enabled: true, key: "", value: "", description: "" }]); }, []);
   const removeUserVar = useCallback((id: number) => setUserVars(p => p.filter(r => r.id !== id)), []);
   const updateUserVar = useCallback((id: number, f: keyof UserVariable, v: string | boolean) =>
     setUserVars(p => p.map(r => r.id === id ? { ...r, [f]: v } : r)), []);
   const insertPresetVar = useCallback((token: string, description: string) => {
     const key = token.replace(/^\{\{|\}\}$/g, "");
-    setUserVars(p => p.find(r => r.key === key) ? p : [...p, { id: ++rowId, enabled: true, key, value: token, description }]);
+    setUserVars(p => p.find(r => r.key === key) ? p : [...p, { id: newRowId(), enabled: true, key, value: token, description }]);
   }, []);
   const enabledUserVarsCount = userVars.filter(v => v.enabled && v.key.trim()).length;
 
@@ -555,7 +569,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     } else {
       setUserPickedRawType(false);
     }
-    const rows = Object.entries(tpl.properties).map(([k, v]) => ({ id: ++rowId, enabled: true, key: k, value: v, description: "" }));
+    const rows = Object.entries(tpl.properties).map(([k, v]) => ({ id: newRowId(), enabled: true, key: k, value: v, description: "" }));
     setProps(rows);
     // Restore Batch / Reply state — for old templates without these fields
     // we fall back to defaults (off / off) rather than leaving them as the
@@ -573,7 +587,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     // collide with anything currently allocated in the form).
     if (tpl.user_vars && tpl.user_vars.length > 0) {
       setUserVars(tpl.user_vars.map(v => ({
-        id: ++rowId,
+        id: newRowId(),
         enabled: v.enabled,
         key: v.key,
         value: v.value,
