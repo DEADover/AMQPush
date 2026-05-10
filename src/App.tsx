@@ -27,6 +27,40 @@ const VIEW_KEYS: Record<string, View> = {
   "5": "history",    "6": "stats",     "7": "console",
 };
 
+/**
+ * Map the user's current location (view + Publisher tab) to a Help section
+ * id. Used to open the in-app guide directly on whatever the user is
+ * looking at — clicking ? on the CSV tab opens "CSV bulk send", on Receive
+ * opens "Receive", and so on.
+ *
+ * Tab strings come from PublisherView's TabKey union; everything else just
+ * keys off `view`. Unknown combos fall back to "getting-started".
+ */
+function helpSectionFor(view: View, pubTab: string): string {
+  if (view === "publisher") {
+    switch (pubTab) {
+      case "variables": return "variables";
+      case "prescript": return "prescript";
+      case "batch":     return "batch";
+      case "csv":       return "csv";
+      case "reply":     return "reply";
+      case "templates": return "templates";
+      // body / properties / anything else → main Send page; users tweaking
+      // schema validation are usually inside the Body tab too.
+      default:          return "send";
+    }
+  }
+  switch (view) {
+    case "connection": return "connection";
+    case "subscriber": return "receive";
+    case "browser":    return "browser";
+    case "history":    return "history";
+    case "stats":      return "stats";
+    case "console":    return "logs";
+    default:           return "getting-started";
+  }
+}
+
 
 const THEME_LABEL_FULL: Record<string, string> = { light: "Light", dark: "Dark", system: "Use system preference" };
 const THEME_OPTIONS: Array<{ id: "light" | "dark" | "system"; label: string; icon: React.ReactNode }> = [
@@ -305,6 +339,11 @@ export default function App() {
   const [updateInfo,    setUpdateInfo]    = useState<UpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  /** Mirrors PublisherView's currently-active tab so we can open Help
+   *  directly on the matching section (e.g. clicking ? while on the CSV
+   *  tab jumps to "CSV bulk send" instead of dropping the user on the
+   *  generic Send page). Updated via PublisherView's onTabChange. */
+  const [pubTab, setPubTab] = useState<string>("body");
   /** Confirm dialog before wiping the log buffer via the Cmd+K palette.
    *  ConsoleView's in-view Clear button has its own confirm; this one is
    *  the parallel for the palette path so both routes are gated. */
@@ -328,6 +367,7 @@ export default function App() {
       onLog={addLog}
       onSent={trackSent}
       onSendError={trackSendError}
+      onTabChange={setPubTab}
     />
   );
 
@@ -629,7 +669,12 @@ export default function App() {
       )}
 
       {/* ─── HELP MODAL ─── */}
-      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+      {showHelp && (
+        <HelpModal
+          initialSection={helpSectionFor(view, pubTab)}
+          onClose={() => setShowHelp(false)}
+        />
+      )}
 
       {/* ─── CLEAR-LOGS CONFIRM (Cmd+K route) ─── */}
       <ConfirmDialog

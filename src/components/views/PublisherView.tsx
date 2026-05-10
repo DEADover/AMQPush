@@ -41,6 +41,11 @@ interface Props {
   onLog: (kind: "info" | "ok" | "err", text: string) => void;
   onSent: (bytes: number, queue: string, kind?: string) => void;
   onSendError?: () => void;
+  /** Notifies the parent of tab changes so context-aware features (like
+   *  the in-app Help, which jumps to the matching section when opened from
+   *  the current tab) can react. Optional — passing nothing keeps the
+   *  view's behaviour identical to before. */
+  onTabChange?: (tab: string) => void;
 }
 
 const INPUT = "bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[12px] text-t-ink outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5";
@@ -168,9 +173,14 @@ function formatXml(raw: string): string {
   } catch { return raw; }
 }
 
-export default function PublisherView({ connected, defaultAddress, activeProfile, resendPayload, sendTrigger, onLog, onSent, onSendError }: Props) {
+export default function PublisherView({ connected, defaultAddress, activeProfile, resendPayload, sendTrigger, onLog, onSent, onSendError, onTabChange }: Props) {
   const [address,    setAddress]    = useState(defaultAddress);
   const [tab,        setTab]        = useState<TabKey>("body");
+  // Push tab changes to the parent so it can keep context-aware features
+  // (Help) in sync. Effect (not wrapping setTab) so every code path that
+  // mutates `tab` — including auto-switches on resend / Reply — broadcasts
+  // without needing to remember to call the callback at each site.
+  useEffect(() => { onTabChange?.(tab); }, [tab, onTabChange]);
   const [mode,       setMode]       = useState<BodyMode>("raw");
   const [rawType,    setRawType]    = useState<RawType>("json");
   const [text,       setText]       = useState("");
