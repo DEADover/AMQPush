@@ -157,38 +157,63 @@ export default function TokenInput({
         className={className}
         {...rest}
       />
-      {open && filtered.length > 0 && (
-        // Visuals matched to CodeMirror's `cm-tooltip-autocomplete` styling
-        // in CodeEditor (bg-t-card, border-t-line, 6px radius, soft shadow,
-        // monospace 12px) so the popup is indistinguishable from the
-        // body editor's dropdown — same selection tint, same paddings.
-        <div
-          className="absolute left-0 top-full mt-1 z-30 min-w-[220px] max-w-md bg-t-card border border-t-line rounded-md font-mono text-[12px] text-t-ink shadow-[0_4px_12px_rgba(0,0,0,0.15)] overflow-hidden"
-          onMouseDown={e => e.preventDefault()}
-        >
-          <ul className="max-h-60 overflow-y-auto m-0 p-0 list-none">
-            {filtered.map((s, i) => (
-              <li
-                key={s.name}
-                onMouseEnter={() => setActiveIdx(i)}
-                onClick={() => handleSelect(s.name)}
-                aria-selected={i === activeIdx}
-                className={`flex items-baseline gap-2 px-2 py-[3px] cursor-pointer ${
-                  i === activeIdx ? "bg-t-selection/[0.18]" : ""
-                }`}
-                title={s.description}
-              >
-                <span className={i === activeIdx ? "text-t-ink" : "text-t-ink2"}>
-                  {s.name}
-                </span>
-                {s.group && (
-                  <span className="text-t-ink5 ml-auto pl-2">{s.group}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {open && filtered.length > 0 && (() => {
+        // CodeMirror renders one letter per "type" (e.g. `c` for constant /
+        // built-in, `v` for variable). Mirror that — built-in tokens get a
+        // dim italic `c`, user-supplied ones get `v`. Anything else falls
+        // back to a blank space so columns stay aligned.
+        function typeIcon(group?: string): string {
+          if (!group) return " ";
+          if (group === "user variable") return "v";
+          return "c"; // built-in / faker / etc.
+        }
+        const active = filtered[activeIdx];
+        return (
+          // Outer wrapper carries the popup AND the side info panel so they
+          // visually pair like CodeMirror's `cm-tooltip-autocomplete` +
+          // `cm-completionInfo`. flex-row with gap so the side panel sits
+          // immediately to the right of the list.
+          <div
+            className="absolute left-0 top-full mt-1 z-30 flex items-start gap-2 font-mono text-[12px]"
+            onMouseDown={e => e.preventDefault()}
+          >
+            {/* Main popup — bg-t-card, border-t-line, 6 px radius, soft
+                shadow; identical to CodeMirror's tooltip rules. */}
+            <div className="min-w-[220px] max-w-md bg-t-card border border-t-line rounded-md text-t-ink shadow-[0_4px_12px_rgba(0,0,0,0.15)] overflow-hidden">
+              <ul className="max-h-60 overflow-y-auto m-0 p-0 list-none">
+                {filtered.map((s, i) => (
+                  <li
+                    key={s.name}
+                    onMouseEnter={() => setActiveIdx(i)}
+                    onClick={() => handleSelect(s.name)}
+                    aria-selected={i === activeIdx}
+                    className={`flex items-baseline gap-2 px-2 py-[3px] cursor-pointer ${
+                      i === activeIdx ? "bg-t-selection/[0.18]" : ""
+                    }`}
+                  >
+                    <span className="text-t-ink5 italic w-3 shrink-0">{typeIcon(s.group)}</span>
+                    <span className={i === activeIdx ? "text-t-ink" : "text-t-ink2"}>
+                      {s.name}
+                    </span>
+                    {s.group && (
+                      <span className="text-t-ink5 italic">{s.group}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Side info panel — only when the active item has a
+                description. Matches CodeMirror's `cm-completionInfo`:
+                bg-t-panel, border-t-line, 11 px, narrow max-width. */}
+            {active?.description && (
+              <div className="bg-t-panel border border-t-line rounded-md px-2 py-1.5 text-[11px] text-t-ink2 max-w-[320px] shadow-[0_4px_12px_rgba(0,0,0,0.15)]">
+                {active.description}
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
