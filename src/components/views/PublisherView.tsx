@@ -1250,7 +1250,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       onChange={v => updateProp(row.id, "value", v)}
                       suggestions={variableSuggestions}
                       placeholder="value (supports {{tokens}})"
-                      className="w-full bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30"
+                      className="w-full text-[12px] py-1.5 px-1.5 rounded hover:bg-t-card focus-within:bg-t-field focus-within:ring-1 focus-within:ring-blue-500/30"
                     />
                     <input value={row.description ?? ""} onChange={e => updateProp(row.id, "description", e.target.value)}
                       placeholder="description"

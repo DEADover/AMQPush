@@ -82,8 +82,12 @@ const appBaseTheme = EditorView.baseTheme({
  * partial `{{…}}` token. Inserts `<name>}}` at the cursor so the final token
  * is `{{<name>}}` — including the closing braces saves a couple of keystrokes
  * and is what users intuitively expect.
+ *
+ * Exported so non-editor inputs (TokenInput, etc.) can reuse the exact same
+ * suggestion logic — same trigger regex, same `apply`, so an input embedded
+ * elsewhere behaves identically to the body editor.
  */
-function variableCompletionSource(vars: VariableSuggestion[]) {
+export function variableCompletionSource(vars: VariableSuggestion[]) {
   return (ctx: CompletionContext): CompletionResult | null => {
     // Match the current `{{…` partial — letters, digits, underscores, hyphens
     // and parens (so `{{random_int(1,1` still triggers).

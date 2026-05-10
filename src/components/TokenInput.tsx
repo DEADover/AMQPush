@@ -1,178 +1,103 @@
-import {
-  useEffect, useRef, useState, useMemo, useCallback,
-  ChangeEvent, KeyboardEvent, InputHTMLAttributes,
-} from "react";
-import { VariableSuggestion } from "./CodeEditor";
-import { AutocompletePopup } from "./autocompleteShared";
+import { useMemo } from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { autocompletion } from "@codemirror/autocomplete";
+import { useTheme } from "../hooks/useTheme";
+import { VariableSuggestion, variableCompletionSource } from "./CodeEditor";
+import { cmAutocompleteTheme } from "./autocompleteShared";
 
 /**
- * Plain `<input>` with `{{token}}` autocomplete — same idea as the
- * CodeMirror-driven completion in CodeEditor, but for places where a
- * full-blown editor would be overkill (Property values, Reply-to, etc.).
+ * Single-line CodeMirror posing as a vanilla `<input>` with `{{token}}`
+ * autocomplete. We tried a hand-rolled popup first, then matched its
+ * styling against CodeMirror's — but the popups kept drifting on width,
+ * font fall-back, italic overhang, etc. Now we just *use* CodeMirror so
+ * the autocomplete IS the body editor's autocomplete — same DOM, same
+ * theme, same sort, same width.
  *
- * Triggers on `{{` immediately before the cursor. While open, the dropdown
- * shows filtered suggestions; Up/Down navigate, Enter / Tab insert,
- * Esc closes. Clicking a row also inserts.
- *
- * Insertion replaces the partial `{{<typed>` with `{{name}}` (closing braces
- * included) and places the cursor right after the closing `}}` so the user
- * can keep typing.
+ * Single-line config: no line numbers, no fold gutter, no active-line
+ * highlight, fixed height to match an `<input>`. A transaction filter
+ * strips line breaks from inserts (paste of multi-line text, Enter key)
+ * so the value behaves like an `<input>` value would.
  */
-
-interface Props extends Omit<InputHTMLAttributes<HTMLInputElement>, "onChange" | "value"> {
+interface Props {
   value: string;
   onChange: (next: string) => void;
-  /** Token catalogue. Same shape as CodeMirror's. Empty / undefined disables
-   *  autocomplete and the input behaves like a vanilla `<input>`. */
   suggestions?: VariableSuggestion[];
+  placeholder?: string;
+  /** Wrapper className — supplies the input's border / padding / focus
+   *  ring so the embedded CodeMirror looks like a regular text input. */
+  className?: string;
 }
 
 export default function TokenInput({
-  value, onChange, suggestions, className, onKeyDown, ...rest
+  value, onChange, suggestions, placeholder, className,
 }: Props) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [open, setOpen] = useState(false);
-  const [partial, setPartial] = useState("");
-  /** Where the `{{` started in the input value — used to compute the slice
-   *  to replace on insert. -1 when no active token. */
-  const [tokenStart, setTokenStart] = useState(-1);
-  const [activeIdx, setActiveIdx] = useState(0);
+  const { effective } = useTheme();
 
-  /** Inspect the text up to the cursor and decide whether autocomplete should
-   *  be open. Returns the start index of the active `{{…` (the position of
-   *  the first `{`) and the partial token text after `{{`, or null when no
-   *  active token. */
-  const detectToken = useCallback((text: string, caret: number) => {
-    if (!suggestions || suggestions.length === 0) return null;
-    const before = text.slice(0, caret);
-    // Find the last unclosed `{{` — anything after it without a `}}` is an
-    // active partial. Whitespace inside is allowed (some users type
-    // `{{ name }}`); we trim before matching.
-    const open2 = before.lastIndexOf("{{");
-    if (open2 < 0) return null;
-    const between = before.slice(open2 + 2);
-    if (between.includes("}}")) return null; // already closed before caret
-    // Reject if the partial spans a line break or contains `{` again —
-    // user is probably done typing or in JSON nesting.
-    if (/[\n\r{}]/.test(between)) return null;
-    return { start: open2, partial: between.trim() };
+  // Compose CodeMirror extensions: autocomplete (when suggestions given),
+  // the shared popup theme, a single-line guard, and styling that matches
+  // an `<input>` (no gutter, compact padding).
+  const extensions = useMemo(() => {
+    const exts = [
+      // Single-line theme — drop padding, no min-height, no gutter.
+      EditorView.theme({
+        "&": { fontSize: "12px", height: "auto" },
+        ".cm-content": { padding: "0", caretColor: "rgb(var(--t-ink))" },
+        ".cm-line": { padding: "0" },
+        ".cm-scroller": {
+          fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
+          lineHeight: "1.5",
+          overflowY: "hidden",
+        },
+        "&.cm-focused": { outline: "none" },
+        ".cm-focused .cm-cursor": { borderLeftColor: "rgb(var(--t-ink))", borderLeftWidth: "1.5px" },
+        ".cm-placeholder": { color: "rgb(var(--t-ink5))" },
+      }),
+      // Strip newlines from any incoming change. Pasting "foo\nbar" lands
+      // as "foobar"; pressing Enter does nothing. Without this Enter would
+      // grow the editor vertically.
+      EditorState.transactionFilter.of(tr => {
+        if (!tr.docChanged) return tr;
+        const newDoc = tr.newDoc.toString();
+        if (!/[\n\r]/.test(newDoc)) return tr;
+        return [{
+          changes: { from: 0, to: tr.startState.doc.length, insert: newDoc.replace(/[\n\r]/g, "") },
+          selection: tr.newSelection,
+        }];
+      }),
+    ];
+    if (suggestions && suggestions.length > 0) {
+      exts.push(autocompletion({ override: [variableCompletionSource(suggestions)] }));
+      exts.push(cmAutocompleteTheme);
+    }
+    return exts;
   }, [suggestions]);
 
-  /** Suggestions filtered against the current partial text. Order matches
-   *  CodeMirror's default behaviour:
-   *   - When no partial is typed (just `{{`), show everything sorted
-   *     alphabetically by name.
-   *   - When the user has typed something, prefix matches come first
-   *     (each block sorted alphabetically), then substring matches.
-   *  Without this both popups had different orderings on the same input. */
-  const filtered = useMemo(() => {
-    if (!suggestions) return [];
-    const byName = (a: VariableSuggestion, b: VariableSuggestion) => a.name.localeCompare(b.name);
-    const q = partial.toLowerCase();
-    if (!q) return [...suggestions].sort(byName).slice(0, 50);
-    const prefix: VariableSuggestion[] = [];
-    const sub: VariableSuggestion[] = [];
-    for (const s of suggestions) {
-      const n = s.name.toLowerCase();
-      if (n.startsWith(q)) prefix.push(s);
-      else if (n.includes(q)) sub.push(s);
-    }
-    prefix.sort(byName);
-    sub.sort(byName);
-    return [...prefix, ...sub].slice(0, 50);
-  }, [suggestions, partial]);
-
-  // Keep activeIdx in range when filter changes
-  useEffect(() => {
-    if (activeIdx >= filtered.length) setActiveIdx(0);
-  }, [filtered.length, activeIdx]);
-
-  function handleInputChange(e: ChangeEvent<HTMLInputElement>) {
-    const next = e.target.value;
-    onChange(next);
-    const caret = e.target.selectionStart ?? next.length;
-    const tok = detectToken(next, caret);
-    if (tok) {
-      setOpen(true);
-      setPartial(tok.partial);
-      setTokenStart(tok.start);
-      setActiveIdx(0);
-    } else if (open) {
-      setOpen(false);
-    }
-  }
-
-  function handleSelect(name: string) {
-    const el = inputRef.current;
-    if (!el || tokenStart < 0) return;
-    const caret = el.selectionStart ?? value.length;
-    const before = value.slice(0, tokenStart);
-    const after = value.slice(caret);
-    const insert = `{{${name}}}`;
-    const next = before + insert + after;
-    onChange(next);
-    setOpen(false);
-    // Restore focus + place cursor right after the closing `}}`
-    requestAnimationFrame(() => {
-      const pos = (before + insert).length;
-      el.focus();
-      el.setSelectionRange(pos, pos);
-    });
-  }
-
-  function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (open && filtered.length > 0) {
-      if (e.key === "ArrowDown") { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, filtered.length - 1)); return; }
-      if (e.key === "ArrowUp")   { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); return; }
-      if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        handleSelect(filtered[activeIdx].name);
-        return;
-      }
-      if (e.key === "Escape") { e.preventDefault(); setOpen(false); return; }
-    }
-    onKeyDown?.(e);
-  }
-
-  // Re-check token state on caret moves (arrow keys, click) without typing
-  function handleCaretChange() {
-    const el = inputRef.current;
-    if (!el) return;
-    const caret = el.selectionStart ?? value.length;
-    const tok = detectToken(value, caret);
-    if (tok) {
-      setOpen(true);
-      setPartial(tok.partial);
-      setTokenStart(tok.start);
-    } else if (open) {
-      setOpen(false);
-    }
-  }
-
   return (
-    <div className="relative inline-block w-full">
-      <input
-        ref={inputRef}
+    <div className={`token-input-wrap ${className ?? ""}`}>
+      <CodeMirror
         value={value}
-        onChange={handleInputChange}
-        onKeyDown={handleKeyDown}
-        onKeyUp={handleCaretChange}
-        onClick={handleCaretChange}
-        onBlur={() => {
-          // Defer close so a click on a suggestion has time to register.
-          setTimeout(() => setOpen(false), 120);
+        onChange={onChange}
+        extensions={extensions}
+        theme={effective === "dark" ? "dark" : "light"}
+        placeholder={placeholder}
+        height="auto"
+        basicSetup={{
+          lineNumbers: false,
+          foldGutter: false,
+          dropCursor: false,
+          allowMultipleSelections: false,
+          indentOnInput: false,
+          bracketMatching: false,
+          closeBrackets: false,
+          autocompletion: false, // we add our own (with the variable source) above
+          highlightActiveLine: false,
+          highlightActiveLineGutter: false,
+          highlightSelectionMatches: false,
+          tabSize: 2,
         }}
-        className={className}
-        {...rest}
       />
-      {open && (
-        <AutocompletePopup
-          items={filtered}
-          activeIdx={activeIdx}
-          onPick={s => handleSelect(s.name)}
-          onHover={setActiveIdx}
-        />
-      )}
     </div>
   );
 }
