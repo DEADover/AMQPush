@@ -1030,7 +1030,7 @@ function PreviewDetails({ msg, bodyMode, setBodyMode, onLog }: {
                 <button
                   key={m}
                   onClick={(e) => { e.stopPropagation(); setBodyMode(m); }}
-                  className={`px-1.5 py-0.5 text-[10px] font-mono uppercase transition-colors ${
+                  className={`px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
                     bodyMode === m ? "bg-blue-500/15 text-blue-500" : "text-t-ink4 hover:text-t-ink2 hover:bg-t-hover"
                   }`}
                   title={
@@ -1038,7 +1038,7 @@ function PreviewDetails({ msg, bodyMode, setBodyMode, onLog }: {
                     m === "raw"  ? "Raw text" : "Hex dump"
                   }
                 >
-                  {m}
+                  {m === "auto" ? "Auto" : m === "raw" ? "Raw" : "Hex"}
                 </button>
               ))}
             </div>

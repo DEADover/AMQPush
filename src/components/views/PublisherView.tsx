@@ -1793,7 +1793,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                 )}
               </div>
             </div>
-            <div className="flex-1 min-h-0 overflow-y-auto p-2">
+            <div className="flex-1 min-h-0 overflow-auto">
               {templates.length === 0 ? (
                 <EmptyState
                   icon={<BookMarked className="w-8 h-8" />}
@@ -1801,125 +1801,179 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                   subtitle='Click "Save current" above to save one'
                 />
               ) : (
-                <div className="space-y-1">
-                  {templates.map(tpl => {
-                    const isRenaming = renamingTpl === tpl.name;
-                    // Detect content kind from saved raw_type, or body shape if missing.
-                    const kind: "json" | "xml" | "text" =
-                      tpl.raw_type === "json" || tpl.raw_type === "xml" || tpl.raw_type === "text"
-                        ? tpl.raw_type
-                        : tpl.body.trimStart().startsWith("{") || tpl.body.trimStart().startsWith("[")
-                          ? "json"
-                          : tpl.body.trimStart().startsWith("<")
-                            ? "xml"
-                            : "text";
-                    const sizeBytes = new TextEncoder().encode(tpl.body).length;
-                    const propsCount = Object.keys(tpl.properties).length;
-                    const varsCount = (tpl.body.match(/\{\{[^}]+\}\}/g) ?? []).length;
-                    // Batch / Reply badges — show only when explicitly on, or
-                    // (for older templates without the flag) inferred from
-                    // non-default values that are sticky in the form.
-                    const batchOn = tpl.batch_enabled === true
-                      || ((tpl.repeat ?? 1) > 1)
-                      || ((tpl.delay_ms ?? 0) > 0);
-                    const replyOn = tpl.reply_enabled === true
-                      || !!(tpl.reply_to && tpl.reply_to.trim());
-                    const kindClass =
-                      kind === "json" ? "bg-blue-500/15 text-blue-500" :
-                      kind === "xml"  ? "bg-violet-500/15 text-violet-500" :
-                                        "bg-t-hover text-t-ink3";
+                <table className="w-full text-[12px]">
+                  <thead className="sticky top-0 bg-t-panel border-b border-t-line z-10">
+                    <tr className="text-left text-[10px] uppercase tracking-wider text-t-ink4 font-semibold">
+                      <th className="px-3 py-1.5 font-semibold">Name</th>
+                      <th className="px-2 py-1.5 font-semibold">Address</th>
+                      <th className="px-2 py-1.5 font-semibold">Kind</th>
+                      <th className="px-2 py-1.5 font-semibold text-right">Size</th>
+                      <th className="px-2 py-1.5 font-semibold text-right">Props</th>
+                      <th className="px-2 py-1.5 font-semibold text-right">Vars</th>
+                      <th className="px-2 py-1.5 font-semibold">Features</th>
+                      <th className="px-2 py-1.5 w-24"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {templates.map(tpl => {
+                      const isRenaming = renamingTpl === tpl.name;
+                      const kind: "json" | "xml" | "text" =
+                        tpl.raw_type === "json" || tpl.raw_type === "xml" || tpl.raw_type === "text"
+                          ? tpl.raw_type
+                          : tpl.body.trimStart().startsWith("{") || tpl.body.trimStart().startsWith("[")
+                            ? "json"
+                            : tpl.body.trimStart().startsWith("<")
+                              ? "xml"
+                              : "text";
+                      const sizeBytes = new TextEncoder().encode(tpl.body).length;
+                      const propsCount = Object.keys(tpl.properties).length;
+                      const varsCount = (tpl.body.match(/\{\{[^}]+\}\}/g) ?? []).length;
+                      const batchOn = tpl.batch_enabled === true
+                        || ((tpl.repeat ?? 1) > 1)
+                        || ((tpl.delay_ms ?? 0) > 0);
+                      const scheduleOn = tpl.schedule_enabled === true
+                        || ((tpl.schedule_delay_secs ?? 0) > 0);
+                      const replyOn = tpl.reply_enabled === true
+                        || !!(tpl.reply_to && tpl.reply_to.trim());
+                      const preScriptOn = !!(tpl.pre_script && tpl.pre_script.trim());
+                      const schemaOn = !!((tpl.body_schema_json && tpl.body_schema_json.trim())
+                        || (tpl.body_schema_xsd && tpl.body_schema_xsd.trim())
+                        || (tpl.body_schema && tpl.body_schema.trim()));
+                      const userVarsOn = !!(tpl.user_vars && tpl.user_vars.length > 0);
+                      const kindClass =
+                        kind === "json" ? "bg-blue-500/15 text-blue-500" :
+                        kind === "xml"  ? "bg-violet-500/15 text-violet-500" :
+                                          "bg-t-hover text-t-ink3";
 
-                    return (
-                      <div key={tpl.name}
-                        className="flex flex-col gap-0.5 px-3 py-2 hover:bg-t-hover/50 rounded-md group transition-colors border border-transparent hover:border-t-line">
+                      // Renaming mode — render a single full-width row that
+                      // captures the input + Save/Cancel; spans all columns
+                      // so the table layout doesn't reflow under the user.
+                      if (isRenaming) {
+                        return (
+                          <tr key={tpl.name} className="border-b border-t-line/40 bg-blue-500/5">
+                            <td colSpan={8} className="px-3 py-1.5">
+                              <div className="flex items-center gap-2">
+                                <input
+                                  autoFocus
+                                  value={renamingDraft}
+                                  onChange={e => setRenamingDraft(e.target.value)}
+                                  onKeyDown={e => {
+                                    if (e.key === "Enter") {
+                                      renameTemplate(tpl.name, renamingDraft);
+                                      setRenamingTpl(null);
+                                    }
+                                    if (e.key === "Escape") setRenamingTpl(null);
+                                  }}
+                                  className={`${INPUT} flex-1 text-[13px] py-1`}
+                                />
+                                <button
+                                  onClick={() => { renameTemplate(tpl.name, renamingDraft); setRenamingTpl(null); }}
+                                  className="px-2 py-1 bg-blue-600 text-white text-[11px] font-semibold rounded hover:bg-blue-500"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setRenamingTpl(null)}
+                                  className="px-2 py-1 text-t-ink4 text-[11px] hover:text-t-ink hover:bg-t-hover rounded"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      }
 
-                        {/* Row 1: name (or rename input) + actions */}
-                        <div className="flex items-center gap-2 min-w-0">
-                          {isRenaming ? (
-                            <>
-                              <input
-                                autoFocus
-                                value={renamingDraft}
-                                onChange={e => setRenamingDraft(e.target.value)}
-                                onKeyDown={e => {
-                                  if (e.key === "Enter") {
-                                    renameTemplate(tpl.name, renamingDraft);
-                                    setRenamingTpl(null);
-                                  }
-                                  if (e.key === "Escape") setRenamingTpl(null);
-                                }}
-                                className={`${INPUT} flex-1 text-[13px] py-1`}
-                              />
-                              <button
-                                onClick={() => { renameTemplate(tpl.name, renamingDraft); setRenamingTpl(null); }}
-                                className="px-2 py-1 bg-blue-600 text-white text-[11px] font-semibold rounded hover:bg-blue-500"
-                              >
-                                Save
-                              </button>
-                              <button
-                                onClick={() => setRenamingTpl(null)}
-                                className="px-2 py-1 text-t-ink4 text-[11px] hover:text-t-ink hover:bg-t-hover rounded"
-                              >
-                                Cancel
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button onClick={() => loadTemplate(tpl)} className="flex-1 text-left min-w-0">
-                                <p className="text-[13px] font-medium text-t-ink truncate">{tpl.name}</p>
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); setRenamingTpl(tpl.name); setRenamingDraft(tpl.name); }}
-                                title="Rename template"
-                                className="opacity-0 group-hover:opacity-100 p-1.5 text-t-ink5 hover:text-blue-500 transition-all rounded"
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => deleteTemplate(tpl.name)}
-                                title="Delete template"
-                                className="opacity-0 group-hover:opacity-100 p-1.5 text-t-ink5 hover:text-red-500 transition-all rounded"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-
-                        {/* Row 2: queue address + summary chips */}
-                        {!isRenaming && (
-                          <div className="flex items-center gap-2 text-[10px] flex-wrap">
-                            <span className="font-mono text-t-ink5 truncate" title={tpl.address || "no address"}>
-                              {tpl.address || <span className="italic">no address</span>}
+                      return (
+                        <tr key={tpl.name}
+                          onClick={() => loadTemplate(tpl)}
+                          className="border-b border-t-line/40 hover:bg-t-hover/50 cursor-pointer group transition-colors">
+                          <td className="px-3 py-1.5">
+                            <span className="text-t-ink font-medium truncate block max-w-[240px]" title={tpl.name}>
+                              {tpl.name}
                             </span>
-                            <span className={`px-1 rounded font-mono font-medium uppercase ${kindClass}`}>{kind}</span>
-                            <span className="text-t-ink5 font-mono">{fmtBytes(sizeBytes)}</span>
-                            {propsCount > 0 && (
-                              <span className="flex items-center gap-0.5 text-t-ink4 font-mono" title={`${propsCount} custom propert${propsCount === 1 ? "y" : "ies"}`}>
-                                <Tag className="w-2.5 h-2.5" />{propsCount}
-                              </span>
-                            )}
-                            {varsCount > 0 && (
-                              <span className="flex items-center gap-0.5 text-blue-500 font-mono" title={`${varsCount} variable token${varsCount === 1 ? "" : "s"} {{…}}`}>
-                                <Braces className="w-2.5 h-2.5" />{varsCount}
-                              </span>
-                            )}
-                            {batchOn && (
-                              <span className="flex items-center gap-0.5 text-amber-500 font-mono" title={`Batch send: ${tpl.repeat ?? "?"}× ${tpl.delay_ms ? `every ${tpl.delay_ms}ms` : ""}`}>
-                                <Repeat2 className="w-2.5 h-2.5" />batch
-                              </span>
-                            )}
-                            {replyOn && (
-                              <span className="flex items-center gap-0.5 text-violet-500 font-mono" title={`Reply to: ${tpl.reply_to ?? ""}`}>
-                                <CornerUpLeft className="w-2.5 h-2.5" />reply
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <span className="font-mono text-t-ink3 truncate block max-w-[200px]"
+                              title={tpl.address || "no address"}>
+                              {tpl.address || <span className="italic text-t-ink5">—</span>}
+                            </span>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium uppercase ${kindClass}`}>
+                              {kind}
+                            </span>
+                          </td>
+                          <td className="px-2 py-1.5 text-right text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
+                          <td className="px-2 py-1.5 text-right text-t-ink4 font-mono">
+                            {propsCount > 0 ? propsCount : <span className="text-t-ink5">—</span>}
+                          </td>
+                          <td className="px-2 py-1.5 text-right font-mono">
+                            {varsCount > 0
+                              ? <span className="text-blue-500">{varsCount}</span>
+                              : <span className="text-t-ink5">—</span>}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              {batchOn && (
+                                <span className="flex items-center gap-0.5 text-[10px] text-amber-500 font-mono"
+                                  title={`Batch: ${tpl.repeat ?? 1}×${tpl.delay_ms ? ` every ${tpl.delay_ms}ms` : ""}`}>
+                                  <Repeat2 className="w-2.5 h-2.5" />batch
+                                </span>
+                              )}
+                              {scheduleOn && (
+                                <span className="flex items-center gap-0.5 text-[10px] text-amber-500 font-mono"
+                                  title={`Schedule: ${tpl.schedule_delay_secs ?? 0}s delay`}>
+                                  <Clock className="w-2.5 h-2.5" />schedule
+                                </span>
+                              )}
+                              {replyOn && (
+                                <span className="flex items-center gap-0.5 text-[10px] text-violet-500 font-mono"
+                                  title={`Reply: ${tpl.reply_to ?? "(dynamic)"}`}>
+                                  <CornerUpLeft className="w-2.5 h-2.5" />reply
+                                </span>
+                              )}
+                              {preScriptOn && (
+                                <span className="flex items-center gap-0.5 text-[10px] text-emerald-500 font-mono"
+                                  title="Has Pre-script">
+                                  <Code2 className="w-2.5 h-2.5" />script
+                                </span>
+                              )}
+                              {schemaOn && (
+                                <span className="flex items-center gap-0.5 text-[10px] text-cyan-500 font-mono"
+                                  title="Has body validation schema">
+                                  <ShieldCheck className="w-2.5 h-2.5" />schema
+                                </span>
+                              )}
+                              {userVarsOn && (
+                                <span className="flex items-center gap-0.5 text-[10px] text-t-ink4 font-mono"
+                                  title={`${tpl.user_vars!.length} user variable${tpl.user_vars!.length === 1 ? "" : "s"}`}>
+                                  <Braces className="w-2.5 h-2.5" />{tpl.user_vars!.length}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setRenamingTpl(tpl.name); setRenamingDraft(tpl.name); }}
+                              title="Rename template"
+                              className="opacity-0 group-hover:opacity-100 p-1 text-t-ink5 hover:text-blue-500 transition-all rounded"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteTemplate(tpl.name); }}
+                              title="Delete template"
+                              className="opacity-0 group-hover:opacity-100 p-1 text-t-ink5 hover:text-red-500 transition-all rounded"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               )}
             </div>
           </div>

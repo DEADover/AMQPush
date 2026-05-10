@@ -16,7 +16,7 @@ use fe2o3_amqp::{
     Delivery, Receiver, Sender, Session,
 };
 use fe2o3_amqp_types::messaging::{
-    AmqpValue, ApplicationProperties, Body, Message, Modified, Properties, Source,
+    AmqpValue, ApplicationProperties, Body, DistributionMode, Message, Properties, Source,
     TerminusDurability, TerminusExpiryPolicy,
 };
 use fe2o3_amqp_types::primitives::{OrderedMap, SimpleValue, Value};
@@ -408,11 +408,30 @@ pub async fn peek_messages(
         .await
         .map_err(|e| format!("Begin session: {e}"))?;
 
-    let mut receiver = Receiver::attach(&mut session, "amqpush-peek-recv", queue)
+    // Attach as a browser via `distribution-mode: copy` on the source —
+    // that's the AMQP 1.0 way to read messages without consuming them.
+    // Artemis honours this by delivering each message exactly once to the
+    // browsing link and leaving the original queued. Falling back to plain
+    // `release` / `modify` semantics produced duplicates on small queues
+    // (Artemis re-delivers the same message until `max` is hit because the
+    // `undeliverable_here` flag is unreliable across releases).
+    let source = Source::builder()
+        .address(queue.to_string())
+        .distribution_mode(DistributionMode::Copy)
+        .build();
+    let mut receiver = Receiver::builder()
+        .name("amqpush-peek-recv")
+        .source(source)
+        .attach(&mut session)
         .await
         .map_err(|e: ReceiverAttachError| format!("Attach receiver: {e}"))?;
 
     let mut out: Vec<PeekedMessage> = Vec::new();
+    // Dedup by message-id as a safety net — even with `distribution_mode:
+    // copy`, brokers that don't honour the flag (older Artemis, third-party
+    // implementations) might still loop the same message. A repeat means
+    // we've cycled through the queue; stop early.
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for _ in 0..max {
         let timeout = Duration::from_millis(per_message_timeout_ms);
         let recv_result =
@@ -420,18 +439,15 @@ pub async fn peek_messages(
         match recv_result {
             Ok(Ok(delivery)) => {
                 let peeked = extract_peeked(&delivery);
-                // Use `modify` with `undeliverable_here=true` so the broker
-                // returns the message to the queue BUT marks it as undeliverable
-                // to *this* link. Otherwise (with plain `release`) Artemis
-                // re-delivers the same message immediately when the queue is
-                // small, causing duplicates in the peek output.
-                let modified = Modified {
-                    delivery_failed: Some(false),
-                    undeliverable_here: Some(true),
-                    message_annotations: None,
-                };
-                if let Err(e) = receiver.modify(&delivery, modified).await {
-                    eprintln!("peek: failed to modify delivery: {e}");
+                // Always settle — in Copy mode this just releases link
+                // credit; the broker keeps the message on the queue.
+                let _ = receiver.accept(&delivery).await;
+
+                if let Some(id) = peeked.message_id.as_ref() {
+                    if !seen_ids.insert(id.clone()) {
+                        // Repeat — the broker is looping us. Stop.
+                        break;
+                    }
                 }
                 out.push(peeked);
             }

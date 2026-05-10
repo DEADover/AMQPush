@@ -806,7 +806,7 @@ function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
                 <button
                   key={m}
                   onClick={(e) => { e.stopPropagation(); setBodyMode(m); }}
-                  className={`px-1.5 py-0.5 text-[10px] font-mono uppercase transition-colors ${
+                  className={`px-1.5 py-0.5 text-[10px] font-mono transition-colors ${
                     bodyMode === m ? "bg-blue-500/15 text-blue-500" : "text-t-ink4 hover:text-t-ink2 hover:bg-t-hover"
                   }`}
                   title={
@@ -814,7 +814,7 @@ function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
                     m === "raw"  ? "Raw text" : "Hex dump"
                   }
                 >
-                  {m}
+                  {m === "auto" ? "Auto" : m === "raw" ? "Raw" : "Hex"}
                 </button>
               ))}
             </div>
