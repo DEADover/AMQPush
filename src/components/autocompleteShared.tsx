@@ -125,12 +125,15 @@ export function AutocompletePopup({ items, activeIdx, onPick, onHover, className
         <ul className="m-0 p-0 list-none" style={{ maxHeight: MAX_HEIGHT, overflowY: "auto" }}>
           {items.map((it, i) => (
             // DOM mirrors CodeMirror's `cm-tooltip-autocomplete > ul > li`:
-            // a block-level row with inline-flow children separated by margins
-            // (no flex), `white-space: nowrap` so the row never wraps, and
-            // `overflow: hidden / text-overflow: ellipsis` for the rare case
-            // a single token is wider than the popup. With this layout the
-            // popup's `width: max-content` actually equals the longest row,
-            // so the popup hugs its content the same way CodeMirror's does.
+            // a block-level row with inline-flow children separated by
+            // margins (no flex) and `white-space: nowrap`. CodeMirror's CSS
+            // also sets `overflow: hidden / text-overflow: ellipsis`, but
+            // that interacts badly with `width: max-content` on the popup
+            // — `overflow: hidden` makes the row report its constrained
+            // width instead of its intrinsic max-content, so the popup
+            // stays narrow and triggers the ellipsis it tried to avoid.
+            // Skipping both lets the row publish its real width upward,
+            // which lets the popup widen to fit the longest row exactly.
             <li
               key={it.name}
               onMouseEnter={() => onHover(i)}
@@ -138,12 +141,10 @@ export function AutocompletePopup({ items, activeIdx, onPick, onHover, className
               aria-selected={i === activeIdx}
               className="cursor-pointer"
               style={{
-                padding:      ROW_PADDING,
-                background:   i === activeIdx ? "rgb(var(--t-selection) / 0.18)" : "transparent",
-                color:        i === activeIdx ? "rgb(var(--t-ink))" : "rgb(var(--t-ink2))",
-                whiteSpace:   "nowrap",
-                overflow:     "hidden",
-                textOverflow: "ellipsis",
+                padding:    ROW_PADDING,
+                background: i === activeIdx ? "rgb(var(--t-selection) / 0.18)" : "transparent",
+                color:      i === activeIdx ? "rgb(var(--t-ink))" : "rgb(var(--t-ink2))",
+                whiteSpace: "nowrap",
               }}
             >
               <span
