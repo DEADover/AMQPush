@@ -353,7 +353,7 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
           }`}
           title={autoOn ? "Auto-refresh on — click to pause" : "Auto-refresh paused"}
         >
-          {autoOn ? "● auto" : "○ auto"}
+          {autoOn ? "● Auto" : "○ Auto"}
         </button>
         <button
           onClick={() => setHideEmpty(h => !h)}

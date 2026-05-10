@@ -671,7 +671,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
             className={`text-[11px] transition-colors px-1.5 py-0.5 rounded shrink-0 ${autoScroll ? "text-blue-500 bg-blue-500/10" : "text-t-ink5 hover:text-t-ink3"}`}
             title="Auto-scroll to newest"
           >
-            {autoScroll ? "● auto" : "○ auto"}
+            {autoScroll ? "● Auto" : "○ Auto"}
           </button>
 
           <button
