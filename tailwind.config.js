@@ -20,6 +20,9 @@ export default {
         "t-ink3":   "rgb(var(--t-ink3)  / <alpha-value>)",
         "t-ink4":   "rgb(var(--t-ink4)  / <alpha-value>)",
         "t-ink5":   "rgb(var(--t-ink5)  / <alpha-value>)",
+        // Selection / matching-bracket tint — also used by autocomplete
+        // popups so non-CodeMirror inputs can match the editor's look.
+        "t-selection": "rgb(var(--t-selection) / <alpha-value>)",
       },
     },
   },

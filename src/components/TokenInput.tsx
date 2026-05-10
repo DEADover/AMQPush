@@ -158,42 +158,35 @@ export default function TokenInput({
         {...rest}
       />
       {open && filtered.length > 0 && (
+        // Visuals matched to CodeMirror's `cm-tooltip-autocomplete` styling
+        // in CodeEditor (bg-t-card, border-t-line, 6px radius, soft shadow,
+        // monospace 12px) so the popup is indistinguishable from the
+        // body editor's dropdown — same selection tint, same paddings.
         <div
-          className="absolute left-0 top-full mt-1 z-30 w-full max-w-md min-w-[220px] bg-t-bg border border-t-line rounded-md shadow-lg overflow-hidden"
-          // Mousedown (not click) — fires before the input's onBlur defer,
-          // but we still rely on the timeout above to close after click.
+          className="absolute left-0 top-full mt-1 z-30 min-w-[220px] max-w-md bg-t-card border border-t-line rounded-md font-mono text-[12px] text-t-ink shadow-[0_4px_12px_rgba(0,0,0,0.15)] overflow-hidden"
           onMouseDown={e => e.preventDefault()}
         >
-          <div className="max-h-56 overflow-y-auto py-0.5">
+          <ul className="max-h-60 overflow-y-auto m-0 p-0 list-none">
             {filtered.map((s, i) => (
-              <button
+              <li
                 key={s.name}
-                type="button"
                 onMouseEnter={() => setActiveIdx(i)}
                 onClick={() => handleSelect(s.name)}
-                className={`w-full flex items-baseline gap-2 px-2.5 py-1 text-left text-[12px] transition-colors ${
-                  i === activeIdx ? "bg-blue-500/15" : "hover:bg-t-hover/50"
+                aria-selected={i === activeIdx}
+                className={`flex items-baseline gap-2 px-2 py-[3px] cursor-pointer ${
+                  i === activeIdx ? "bg-t-selection/[0.18]" : ""
                 }`}
+                title={s.description}
               >
-                <span className={`font-mono truncate ${i === activeIdx ? "text-blue-500" : "text-t-ink2"}`}>
+                <span className={i === activeIdx ? "text-t-ink" : "text-t-ink2"}>
                   {s.name}
                 </span>
                 {s.group && (
-                  <span className="text-[10px] text-t-ink5 shrink-0 ml-auto">{s.group}</span>
+                  <span className="text-t-ink5 ml-auto pl-2">{s.group}</span>
                 )}
-                {s.description && (
-                  <span className="text-[10px] text-t-ink5 truncate hidden sm:inline">
-                    {s.description}
-                  </span>
-                )}
-              </button>
+              </li>
             ))}
-          </div>
-          <div className="px-2 py-1 text-[10px] text-t-ink5 border-t border-t-line bg-t-panel/60 flex items-center gap-2">
-            <kbd className="font-mono px-1 py-0.5 border border-t-line rounded">↑↓</kbd> navigate
-            <kbd className="font-mono px-1 py-0.5 border border-t-line rounded">↵</kbd> insert
-            <kbd className="font-mono px-1 py-0.5 border border-t-line rounded">Esc</kbd> close
-          </div>
+          </ul>
         </div>
       )}
     </div>
