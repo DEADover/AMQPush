@@ -3,7 +3,6 @@ import CodeMirror from "@uiw/react-codemirror";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { autocompletion } from "@codemirror/autocomplete";
-import { useTheme } from "../hooks/useTheme";
 import { VariableSuggestion, variableCompletionSource } from "./CodeEditor";
 import { cmAutocompleteTheme } from "./autocompleteShared";
 
@@ -33,26 +32,47 @@ interface Props {
 export default function TokenInput({
   value, onChange, suggestions, placeholder, className,
 }: Props) {
-  const { effective } = useTheme();
 
   // Compose CodeMirror extensions: autocomplete (when suggestions given),
-  // the shared popup theme, a single-line guard, and styling that matches
-  // an `<input>` (no gutter, compact padding).
+  // the shared popup theme, a single-line guard, and styling that makes
+  // the editor look like an inline `<input>` — fully transparent so the
+  // wrapper's background (the table row) shows through, no own bg / border,
+  // placeholder colour and font matching the form's plain inputs.
   const extensions = useMemo(() => {
     const exts = [
-      // Single-line theme — drop padding, no min-height, no gutter.
       EditorView.theme({
-        "&": { fontSize: "12px", height: "auto" },
-        ".cm-content": { padding: "0", caretColor: "rgb(var(--t-ink))" },
-        ".cm-line": { padding: "0" },
+        "&": {
+          fontSize: "12px",
+          height: "auto",
+          backgroundColor: "transparent",
+        },
+        ".cm-editor": { backgroundColor: "transparent" },
         ".cm-scroller": {
           fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
           lineHeight: "1.5",
           overflowY: "hidden",
+          backgroundColor: "transparent",
+        },
+        ".cm-content": {
+          padding: "0",
+          caretColor: "rgb(var(--t-ink))",
+          color: "rgb(var(--t-ink))",
+          backgroundColor: "transparent",
+        },
+        ".cm-line": { padding: "0", backgroundColor: "transparent" },
+        ".cm-activeLine": { backgroundColor: "transparent" },
+        ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+          background: "rgb(var(--t-selection) / 0.18) !important",
         },
         "&.cm-focused": { outline: "none" },
-        ".cm-focused .cm-cursor": { borderLeftColor: "rgb(var(--t-ink))", borderLeftWidth: "1.5px" },
-        ".cm-placeholder": { color: "rgb(var(--t-ink5))" },
+        ".cm-focused .cm-cursor": {
+          borderLeftColor: "rgb(var(--t-ink))",
+          borderLeftWidth: "1.5px",
+        },
+        ".cm-placeholder": {
+          color: "rgb(var(--t-ink5))",
+          fontStyle: "normal",
+        },
       }),
       // Strip newlines from any incoming change. Pasting "foo\nbar" lands
       // as "foobar"; pressing Enter does nothing. Without this Enter would
@@ -80,7 +100,11 @@ export default function TokenInput({
         value={value}
         onChange={onChange}
         extensions={extensions}
-        theme={effective === "dark" ? "dark" : "light"}
+        // Skip the library's bundled "light"/"dark" theme — it paints a
+        // solid editor background that looks alien inside a table row.
+        // Our inline EditorView.theme above handles all colours via the
+        // `--t-*` CSS variables, which already track the active theme.
+        theme="none"
         placeholder={placeholder}
         height="auto"
         basicSetup={{
