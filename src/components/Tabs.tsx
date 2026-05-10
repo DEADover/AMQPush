@@ -18,30 +18,32 @@ interface Props {
 
 export default function Tabs({ tabs, active, onChange, className }: Props) {
   return (
-    <div className={`shrink-0 flex items-stretch border-b border-t-line bg-t-panel ${className ?? ""}`}>
+    <div role="tablist" className={`shrink-0 flex items-stretch border-b border-t-line bg-t-panel ${className ?? ""}`}>
       {tabs.map(tab => {
         const isActive = active === tab.id;
         return (
           <button
             key={tab.id}
+            role="tab"
+            aria-selected={isActive}
             onClick={() => onChange(tab.id)}
-            className={`relative flex items-center gap-1.5 px-3 py-1.5 text-[12px] transition-colors whitespace-nowrap ${
+            className={`relative flex items-center gap-1.5 px-3 py-1.5 text-[12px] transition-colors whitespace-nowrap outline-none focus-visible:bg-t-hover/50 ${
               isActive
                 ? "text-t-ink font-medium"
-                : "text-t-ink3 hover:text-t-ink2 hover:bg-t-hover/60"
+                : "text-t-ink3 hover:text-t-ink2 hover:bg-t-hover/50"
             }`}
           >
             {tab.icon}
             <span>{tab.label}</span>
             {tab.badge !== undefined && tab.badge !== 0 && tab.badge !== "" && (
               <span className={`text-[10px] px-1 py-0 rounded font-medium leading-4 ${
-                isActive ? "bg-blue-600/15 text-blue-500" : "text-t-ink4"
+                isActive ? "bg-blue-500/15 text-blue-500" : "text-t-ink4"
               }`}>
                 {tab.badge}
               </span>
             )}
             {tab.dot && !isActive && (
-              <span className="w-1 h-1 rounded-full bg-blue-500" />
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
             )}
             {isActive && (
               <span className="absolute -bottom-px left-2 right-2 h-0.5 bg-blue-600 rounded-full" />

@@ -1,13 +1,15 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  History, Search, Trash2, Copy, RotateCcw, FileText, Tag, Download, Inbox, Mail,
+  History, Search, Trash2, RotateCcw, FileText, Tag, Download, Inbox, Mail,
   MessageSquare, X,
 } from "lucide-react";
 import { HistoryEntry } from "../../types";
 import CollapsibleSection from "../CollapsibleSection";
 import PropsList from "../PropsList";
 import EmptyState from "../EmptyState";
+import ViewTopBar from "../ViewTopBar";
+import CopyButton from "../CopyButton";
 import { fmtBytes } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
@@ -69,11 +71,37 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
     [entries, q]
   );
 
-  // Auto-select first entry when list loads (or when current selection disappears)
+  // Track whether the user explicitly dismissed the preview pane (clicked
+  // the X button). When set, auto-select stays disabled until the user picks
+  // a row again — otherwise the close-effect would race the auto-select
+  // effect and the preview would never actually close.
+  const userClosedRef = useRef(false);
+
+  // Auto-select first entry when list loads / filter changes — but not when
+  // the only thing that changed is the user clearing `selectedId`.
   useEffect(() => {
-    if (selectedId && filtered.some(e => e.id === selectedId)) return;
-    setSelectedId(filtered[0]?.id ?? null);
-  }, [filtered, selectedId]);
+    if (userClosedRef.current) return;
+    setSelectedId(prev => {
+      if (prev && filtered.some(e => e.id === prev)) return prev;
+      return filtered[0]?.id ?? null;
+    });
+  }, [filtered]);
+
+  // Search input is the user's explicit action to refine the list — treat it
+  // as "I want to see results", clearing the dismissed flag so auto-select
+  // works again on the new filter.
+  useEffect(() => {
+    userClosedRef.current = false;
+  }, [search]);
+
+  function selectEntry(id: string) {
+    userClosedRef.current = false;
+    setSelectedId(id);
+  }
+  function closePreview() {
+    userClosedRef.current = true;
+    setSelectedId(null);
+  }
 
   const selected = filtered.find(e => e.id === selectedId) ?? null;
 
@@ -81,33 +109,29 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
       {/* ─── TOP BAR ─── */}
-      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <History className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
-        <span className="text-[13px] font-semibold text-t-ink">History</span>
-        <span className="text-[11px] text-t-ink5 font-mono">
-          {filtered.length === entries.length ? `${entries.length} sent` : `${filtered.length} / ${entries.length}`}
-        </span>
-
-        <div className="flex items-center gap-1 ml-auto">
-          <button onClick={load}
-            className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1"
-            title="Refresh">
-            <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
-          </button>
-          <button onClick={() => exportAs("json")} disabled={entries.length === 0}
-            className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
-            <Download className="w-3 h-3" /> JSON
-          </button>
-          <button onClick={() => exportAs("csv")} disabled={entries.length === 0}
-            className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
-            <Download className="w-3 h-3" /> CSV
-          </button>
-          <button onClick={clearAll} disabled={entries.length === 0}
-            className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
-            <Trash2 className="w-3 h-3" /> Clear
-          </button>
-        </div>
-      </div>
+      <ViewTopBar
+        icon={<History className="w-3.5 h-3.5" />}
+        title="Message History"
+        count={filtered.length === entries.length ? `${entries.length} sent` : `${filtered.length} / ${entries.length}`}
+      >
+        <button onClick={load}
+          className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1"
+          title="Refresh">
+          <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
+        </button>
+        <button onClick={() => exportAs("json")} disabled={entries.length === 0}
+          className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
+          <Download className="w-3 h-3" /> JSON
+        </button>
+        <button onClick={() => exportAs("csv")} disabled={entries.length === 0}
+          className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
+          <Download className="w-3 h-3" /> CSV
+        </button>
+        <button onClick={clearAll} disabled={entries.length === 0}
+          className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
+          <Trash2 className="w-3 h-3" /> Clear
+        </button>
+      </ViewTopBar>
 
       {/* ─── FILTER BAR — only when entries exist ─── */}
       {entries.length > 0 && (
@@ -142,7 +166,7 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
               {filtered.map(entry => (
                 <ListItem key={entry.id} entry={entry}
                   selected={entry.id === selectedId}
-                  onClick={() => setSelectedId(entry.id)} />
+                  onClick={() => selectEntry(entry.id)} />
               ))}
             </div>
           )}
@@ -154,7 +178,7 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
             entry={selected}
             onResend={onResend}
             onLog={onLog}
-            onClose={() => setSelectedId(null)}
+            onClose={closePreview}
           />
         )}
         {!selected && filtered.length > 0 && (
@@ -283,13 +307,13 @@ function PreviewPane({ entry, onResend, onLog, onClose }: {
               >
                 <RotateCcw className="w-3 h-3" /> Resend
               </button>
-              <button
-                onClick={() => { navigator.clipboard.writeText(bodyText); onLog("info", "Body copied"); }}
+              <CopyButton
+                value={bodyText}
+                onCopied={() => onLog("info", "Body copied")}
+                label="Copy"
                 title="Copy body"
                 className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors"
-              >
-                <Copy className="w-3 h-3" /> Copy
-              </button>
+              />
             </>
           ) : entry.file_data_b64 ? (
             <button
@@ -393,14 +417,12 @@ function PreviewPane({ entry, onResend, onLog, onClose }: {
                   ))}
                 </div>
                 {bodyText && (
-                  <button onClick={(e) => {
-                    e.stopPropagation();
-                    navigator.clipboard.writeText(bodyText);
-                    onLog("info", "Body copied");
-                  }}
-                    className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover">
-                    <Copy className="w-3 h-3" /> Copy
-                  </button>
+                  <CopyButton
+                    value={bodyText}
+                    onCopied={() => onLog("info", "Body copied")}
+                    label="Copy"
+                    className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover"
+                  />
                 )}
               </div>
             }

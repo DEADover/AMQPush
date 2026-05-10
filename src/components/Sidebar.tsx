@@ -8,14 +8,17 @@ interface Props {
   onToggleCollapsed: () => void;
 }
 
+// Sidebar nav icons — use the canonical `w-3.5 h-3.5` (14px) sizing seen
+// across all view top bars rather than the off-scale `w-[15px]` we used to
+// have. Identical column width for both expanded and collapsed states.
 const ITEMS: { id: View; icon: React.ReactNode; label: string; kbd?: string }[] = [
-  { id: "connection", icon: <Settings2  className="w-[15px] h-[15px]" />, label: "Connection", kbd: "⌘1" },
-  { id: "publisher",  icon: <Send       className="w-[15px] h-[15px]" />, label: "Send",       kbd: "⌘2" },
-  { id: "subscriber", icon: <Inbox      className="w-[15px] h-[15px]" />, label: "Receive",    kbd: "⌘3" },
-  { id: "browser",    icon: <Radar      className="w-[15px] h-[15px]" />, label: "Browser",    kbd: "⌘4" },
-  { id: "history",    icon: <History    className="w-[15px] h-[15px]" />, label: "History",    kbd: "⌘5" },
-  { id: "stats",      icon: <BarChart2  className="w-[15px] h-[15px]" />, label: "Stats",      kbd: "⌘6" },
-  { id: "console",    icon: <Terminal   className="w-[15px] h-[15px]" />, label: "Logs",       kbd: "⌘7" },
+  { id: "connection", icon: <Settings2  className="w-3.5 h-3.5" />, label: "Connection", kbd: "⌘1" },
+  { id: "publisher",  icon: <Send       className="w-3.5 h-3.5" />, label: "Send",       kbd: "⌘2" },
+  { id: "subscriber", icon: <Inbox      className="w-3.5 h-3.5" />, label: "Receive",    kbd: "⌘3" },
+  { id: "browser",    icon: <Radar      className="w-3.5 h-3.5" />, label: "Browser",    kbd: "⌘4" },
+  { id: "history",    icon: <History    className="w-3.5 h-3.5" />, label: "History",    kbd: "⌘5" },
+  { id: "stats",      icon: <BarChart2  className="w-3.5 h-3.5" />, label: "Stats",      kbd: "⌘6" },
+  { id: "console",    icon: <Terminal   className="w-3.5 h-3.5" />, label: "Logs",       kbd: "⌘7" },
 ];
 
 const TRANSITION = "transition-[width,opacity] duration-200 ease-out";
@@ -34,14 +37,16 @@ export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed
               key={item.id}
               onClick={() => onChange(item.id)}
               title={collapsed ? `${item.label}${item.kbd ? `  ${item.kbd}` : ""}` : undefined}
+              aria-label={collapsed ? item.label : undefined}
+              aria-current={isActive ? "page" : undefined}
               className={`relative h-8 px-2 rounded-md flex items-center gap-2 transition-colors group whitespace-nowrap text-[12px] shrink-0 ${
                 isActive
                   ? "bg-blue-600 text-white"
                   : "text-t-ink3 hover:bg-t-hover hover:text-t-ink"
               }`}
             >
-              {/* Icon — always visible, fixed size column */}
-              <span className="shrink-0 flex items-center justify-center w-[15px]">{item.icon}</span>
+              {/* Icon column — fixed at 14px so collapsed and expanded layouts align. */}
+              <span className="shrink-0 flex items-center justify-center w-3.5">{item.icon}</span>
 
               {/* Label — fades out on collapse */}
               <span className={`flex-1 text-left truncate ${TRANSITION} ${
@@ -50,10 +55,12 @@ export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed
                 {item.label}
               </span>
 
-              {/* Keyboard shortcut — fades out on collapse */}
+              {/* Keyboard shortcut — fades out on collapse.
+                  Active uses `text-white/70` (muted-on-active) instead of a raw
+                  blue-200 palette colour so the only colour used here is `white`. */}
               {item.kbd && (
                 <span className={`text-[10px] font-mono shrink-0 ${TRANSITION} ${
-                  collapsed ? "opacity-0" : (isActive ? "text-blue-200" : "text-t-ink5")
+                  collapsed ? "opacity-0" : (isActive ? "text-white/70" : "text-t-ink5")
                 }`}>
                   {item.kbd}
                 </span>
@@ -61,7 +68,7 @@ export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed
 
               {/* Tooltip — shown only when collapsed (otherwise label is visible inline) */}
               {collapsed && (
-                <span className="absolute left-12 bg-t-card text-t-ink text-xs px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 border border-t-line shadow-lg flex items-center gap-2">
+                <span className="absolute left-12 bg-t-card text-t-ink text-[12px] px-2 py-1 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50 border border-t-line shadow-lg flex items-center gap-2">
                   {item.label}
                   {item.kbd && <span className="text-t-ink5">{item.kbd}</span>}
                 </span>
@@ -75,14 +82,16 @@ export default function Sidebar({ active, onChange, collapsed, onToggleCollapsed
       <button
         onClick={onToggleCollapsed}
         title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!collapsed}
         className="shrink-0 mt-1 mx-1.5 h-8 px-2 rounded-md flex items-center gap-2 text-t-ink4 hover:bg-t-hover hover:text-t-ink2 transition-colors whitespace-nowrap"
       >
-        <span className="shrink-0 flex items-center justify-center w-[15px]">
+        <span className="shrink-0 flex items-center justify-center w-3.5">
           {collapsed
-            ? <PanelLeftOpen  className="w-[15px] h-[15px]" />
-            : <PanelLeftClose className="w-[15px] h-[15px]" />}
+            ? <PanelLeftOpen  className="w-3.5 h-3.5" />
+            : <PanelLeftClose className="w-3.5 h-3.5" />}
         </span>
-        <span className={`flex-1 text-left text-[11px] truncate ${TRANSITION} ${
+        <span className={`flex-1 text-left text-[12px] truncate ${TRANSITION} ${
           collapsed ? "opacity-0" : "opacity-100"
         }`}>
           Collapse

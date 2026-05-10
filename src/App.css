@@ -24,6 +24,11 @@
   --t-ink3:     115 115 124;   /* muted               zinc-500         */
   --t-ink4:     156 156 165;   /* subtle              zinc-400+        */
   --t-ink5:     200 200 206;   /* ghost               zinc-300+        */
+
+  /* Text-selection / matching-bracket tint — used by CodeEditor and any
+     future text widget. RGB channels so `rgb(var(--t-selection) / 0.18)`
+     works without inlining hex. */
+  --t-selection: 59 130 246;
 }
 
 .dark {
@@ -43,6 +48,9 @@
   --t-ink3:     161 161 170;   /* muted               zinc-400  */
   --t-ink4:     113 113 122;   /* subtle              zinc-500  */
   --t-ink5:      82  82  91;   /* ghost               zinc-600  */
+
+  /* Selection — slightly brighter blue on dark backgrounds. */
+  --t-selection: 96 165 250;
 }
 
 /* ── Base ─────────────────────────────────────────────────────────────────── */
@@ -71,6 +79,15 @@ body {
 /* ── Utilities ──────────────────────────────────────────────────────────────  */
 
 .log-selectable { user-select: text; }
+
+/* Tiny pulse used by CopyButton when the user clicks Copy — confirms the
+   click visually before the icon settles into its `Check` state. */
+@keyframes copyPulse {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+.animate-copy-pulse { animation: copyPulse 320ms ease-out; }
 
 /* ── CodeMirror integration — Postman-style flush look ──────────────────── */
 

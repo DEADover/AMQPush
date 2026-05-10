@@ -1,4 +1,4 @@
-import { Copy } from "lucide-react";
+import CopyButton from "./CopyButton";
 
 /**
  * Standard property list shown inside CollapsibleSection bodies. Each row is
@@ -20,19 +20,15 @@ export default function PropsList({ items, onLog }: {
         const value = String(v);
         return (
           <div key={k}
-            className="group grid grid-cols-[140px_1fr_auto] gap-x-3 items-start py-0.5 px-1 -mx-1 rounded hover:bg-t-hover/40 transition-colors">
+            className="group grid grid-cols-[140px_1fr_auto] gap-x-3 items-start py-0.5 px-1 -mx-1 rounded hover:bg-t-hover/50 transition-colors">
             <span className="text-t-ink4 truncate select-text">{k}</span>
             <span className="text-t-ink2 break-all select-text">{value}</span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(value);
-                onLog("info", `Copied ${k}`);
-              }}
+            <CopyButton
+              value={value}
+              onCopied={() => onLog("info", `Copied ${k}`)}
               title={`Copy ${k}`}
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-t-ink5 hover:text-t-ink2 hover:bg-t-hover">
-              <Copy className="w-3 h-3" />
-            </button>
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-t-ink5 hover:text-t-ink2 hover:bg-t-hover"
+            />
           </div>
         );
       })}

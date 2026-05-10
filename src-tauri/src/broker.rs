@@ -148,6 +148,20 @@ pub async fn list_queues_via(channel: &mut ManagementChannel) -> Result<Vec<Brok
     call_management(&mut channel.sender, &mut channel.receiver, &channel.reply_to).await
 }
 
+/// Permanently delete every message currently sitting in the queue. Returns
+/// the number of messages that were removed (Artemis reports this from
+/// `removeAllMessages`). Destructive — caller must confirm with the user.
+pub async fn purge_queue_via(channel: &mut ManagementChannel, queue: &str) -> Result<i64, String> {
+    invoke_management::<i64>(
+        &mut channel.sender,
+        &mut channel.receiver,
+        &channel.reply_to,
+        &format!("queue.{queue}"),
+        "removeAllMessages",
+        Body::Value(AmqpValue(Value::String("[]".into()))),
+    ).await
+}
+
 async fn call_management(
     sender: &mut Sender,
     receiver: &mut Receiver,
@@ -526,19 +540,29 @@ pub(crate) fn extract_peeked(delivery: &Delivery<Body<Value>>) -> PeekedMessage 
 }
 
 /// Convert AMQP body to a printable form. Returns (kind, text, size).
+///
+/// Kind is normalised to user-facing labels — `text`, `binary`, or `empty` —
+/// rather than the raw AMQP body section names (`amqp-value`, `data`, etc.).
+/// This keeps the Browser/Receive/History chips human-readable; if the user
+/// needs the lower-level type they can look at content-type / content-encoding
+/// in the property panel.
 fn describe_body(body: &Body<Value>) -> (&'static str, Option<String>, usize) {
     match body {
         Body::Data(batch) => {
-            // AMQP allows multiple Data sections — take the first one for inspection
-            let first = batch.iter().next();
-            match first {
-                None => ("data", None, 0),
+            // AMQP allows multiple Data sections — take the first one for inspection.
+            // The Data section is by definition opaque bytes; if the bytes happen to
+            // decode as valid UTF-8 we treat it as text (this is how JMS TextMessage
+            // and most JSON/XML producers actually ship payloads — encoded as Data).
+            match batch.iter().next() {
+                None => ("empty", None, 0),
                 Some(data) => {
                     let bytes: &[u8] = data.0.as_ref();
                     let size = bytes.len();
                     match std::str::from_utf8(bytes) {
-                        Ok(s) => ("data", Some(s.to_string()), size),
+                        Ok(s) => ("text", Some(s.to_string()), size),
                         Err(_) => {
+                            // Hex-preview the first 512 bytes so the UI has something
+                            // to render in HEX mode without us having to send raw bytes.
                             let hex = bytes
                                 .iter()
                                 .take(512)
@@ -551,16 +575,29 @@ fn describe_body(body: &Body<Value>) -> (&'static str, Option<String>, usize) {
                 }
             }
         }
-        Body::Sequence(_) => ("amqp-sequence", None, 0),
+        // amqp-sequence: rare list-of-values payload. Serialise to a stringified
+        // form (already done by simple_value_to_string_v on each element) and
+        // present as text — there's no clean binary interpretation.
+        Body::Sequence(_) => ("text", None, 0),
         Body::Value(AmqpValue(v)) => {
-            let s = simple_value_to_string_v(v);
-            let size = s.len();
-            ("amqp-value", Some(s), size)
+            // Distinguish Binary primitive (→ binary) from everything else (→ text).
+            match v {
+                Value::Binary(b) => {
+                    let size = b.len();
+                    let hex = b.iter().take(512).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
+                    ("binary", Some(hex), size)
+                }
+                _ => {
+                    let s = simple_value_to_string_v(v);
+                    let size = s.len();
+                    ("text", Some(s), size)
+                }
+            }
         }
         Body::Empty => ("empty", None, 0),
         // Newer fe2o3-amqp may add multiple-data variant — fall back.
         #[allow(unreachable_patterns)]
-        _ => ("unknown", None, 0),
+        _ => ("text", None, 0),
     }
 }
 

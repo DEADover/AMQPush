@@ -3,15 +3,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import {
-  Play, Square, Trash2, Copy, Inbox, Search, X, Loader2, Pause, CornerUpLeft,
+  Play, Square, Trash2, Inbox, Search, X, Loader2, Pause, CornerUpLeft,
   Tag, MessageSquare, Download, Palette, Plus, Edit3,
   Database, GitCompare, ChevronDown,
 } from "lucide-react";
+import CopyButton from "../CopyButton";
 import { ReceivedMessage, SubEvent } from "../../types";
 import QueuePicker from "../QueuePicker";
 import CollapsibleSection from "../CollapsibleSection";
 import PropsList from "../PropsList";
 import EmptyState from "../EmptyState";
+import SectionLabel from "../SectionLabel";
+import ViewTopBar from "../ViewTopBar";
 import { fmtBytes, fmtDuration, csvEscape } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
@@ -472,11 +475,11 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
   return (
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
-      {/* ─── TOP BAR ─── */}
-      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <span className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest shrink-0">Queue</span>
-        <QueuePicker value={picker} onChange={setPicker} connected={connected} disabled={false} showSave className="flex-1" />
-
+      {/* ─── TITLE ROW ─── */}
+      <ViewTopBar
+        icon={<Inbox className="w-3.5 h-3.5" />}
+        title="Receive message"
+      >
         {listening && (
           <button
             onClick={togglePause}
@@ -509,6 +512,12 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
             <Square className="w-3 h-3" /> Stop all
           </button>
         )}
+      </ViewTopBar>
+
+      {/* ─── QUEUE PICKER ROW ─── */}
+      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+        <SectionLabel className="shrink-0">From</SectionLabel>
+        <QueuePicker value={picker} onChange={setPicker} connected={connected} disabled={false} showSave className="flex-1" />
       </div>
 
       {/* ─── ACTIVE SUBSCRIPTIONS BAR ─── */}
@@ -802,13 +811,13 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
                     <CornerUpLeft className="w-3 h-3" /> Reply
                   </button>
                 )}
-                <button
-                  onClick={() => navigator.clipboard.writeText(selected.meta.body_text ?? selected.body)}
+                <CopyButton
+                  value={() => selected.meta.body_text ?? selected.body}
+                  onCopied={() => onLog("info", "Body copied")}
+                  label="Copy"
                   title="Copy body"
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors"
-                >
-                  <Copy className="w-3 h-3" /> Copy
-                </button>
+                />
                 <button
                   onClick={() => setSelectedId(null)}
                   title="Close preview"
@@ -858,7 +867,11 @@ function PreviewDetails({ msg, bodyMode, setBodyMode, onLog }: {
   const [bodyOpen,  setBodyOpen]  = useState(true);
 
   const meta = msg.meta;
-  const appProps = Object.entries(meta.application_properties);
+  // Sort alphabetically for stable display — Rust's HashMap iteration order
+  // is non-deterministic, so without this the same message can show its
+  // application properties in different orders on each render.
+  const appProps = Object.entries(meta.application_properties)
+    .sort(([a], [b]) => a.localeCompare(b));
 
   const detected = detectFormat({ contentType: meta.content_type, bodyText: meta.body_text });
   const bodyContent = (() => {
@@ -948,14 +961,12 @@ function PreviewDetails({ msg, bodyMode, setBodyMode, onLog }: {
               ))}
             </div>
             {meta.body_text && (
-              <button onClick={(e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(meta.body_text!);
-                onLog("info", "Body copied");
-              }}
-                className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover">
-                <Copy className="w-3 h-3" /> Copy
-              </button>
+              <CopyButton
+                value={meta.body_text}
+                onCopied={() => onLog("info", "Body copied")}
+                label="Copy"
+                className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover"
+              />
             )}
           </div>
         }

@@ -1,8 +1,13 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, Save, Trash2, Plug, Unplug, Loader2, Settings2, Plus, Copy, Check, CheckCircle, XCircle, Info, Activity, SlidersHorizontal, Sliders } from "lucide-react";
+import { ChevronDown, Save, Trash2, Plug, Unplug, Loader2, Settings2, Plus, Copy, CheckCircle, XCircle, Info, Activity, SlidersHorizontal, Sliders } from "lucide-react";
 import { Profile, LogEntry } from "../../types";
 import Tabs, { TabItem } from "../Tabs";
+import ViewTopBar from "../ViewTopBar";
+import SectionLabel from "../SectionLabel";
+import Toggle from "../Toggle";
+import Callout from "../Callout";
+import Dropdown, { DropdownItem, DropdownFooter } from "../Dropdown";
 
 type MainTab = "main" | "advanced";
 
@@ -36,7 +41,9 @@ interface Props {
   onLog: (kind: "info" | "ok" | "err", text: string) => void;
 }
 
-const LABEL = "block text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-1.5";
+// Canonical form-label class: matches `<SectionLabel>` typography
+// (`font-semibold tracking-wider`) so labels never drift from section headings.
+const LABEL = "block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5";
 const INPUT = "w-full bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[12px] text-t-ink outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5";
 
 const DEFAULTS: ConnForm = {
@@ -60,7 +67,6 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
   const sel = activeProfile;
   const setSel = onProfileSelected;
   const [loaded,      setLoaded]      = useState<Profile | null>(null); // last loaded — to detect unsaved changes
-  const [pickerOpen,  setPickerOpen]  = useState(false);
   const [connecting,  setConnecting]  = useState(false);
   const [savingAs,    setSavingAs]    = useState(false);       // showing inline name prompt
   const [newName,     setNewName]     = useState("");
@@ -91,7 +97,6 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
     (Number(heartbeatSecs) || 0) > 0 ||
     (Number(connectTimeoutSecs) || 10) !== 10;
 
-  const pickerRef = useRef<HTMLDivElement>(null);
   const logsBottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-select first profile when list arrives and nothing's selected yet
@@ -109,17 +114,6 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       }
     }
   }, [profiles, sel]);
-
-  // Close picker on outside click
-  useEffect(() => {
-    function onClick(e: MouseEvent) {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) setPickerOpen(false);
-    }
-    if (pickerOpen) {
-      document.addEventListener("mousedown", onClick);
-      return () => document.removeEventListener("mousedown", onClick);
-    }
-  }, [pickerOpen]);
 
   function apply(p: Profile) {
     setForm({
@@ -141,14 +135,12 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
     apply(p);
     setSel(p.name);
     setLoaded(p);
-    setPickerOpen(false);
   }
 
   function newProfile() {
     setForm(DEFAULTS);
     setSel("");
     setLoaded(null);
-    setPickerOpen(false);
   }
 
   // Detect unsaved changes by comparing current form to loaded profile
@@ -277,25 +269,23 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
       {/* ─── TOP BAR ─── */}
-      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <Settings2 className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
-        <span className="text-[13px] font-semibold text-t-ink">Connection</span>
-
-        <div className="flex items-center gap-1 ml-auto">
-          <button
-            onClick={toggle}
-            disabled={connecting}
-            className={`px-3.5 py-1.5 rounded-md text-[12px] font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shrink-0 flex items-center gap-1.5 ${
-              connected
-                ? "bg-t-card border border-t-line2 text-t-ink2 hover:bg-t-hover"
-                : "bg-blue-600 hover:bg-blue-500 text-white"
-            }`}
-          >
-            {connecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : connected ? <Unplug className="w-3.5 h-3.5" /> : <Plug className="w-3.5 h-3.5" />}
-            {connecting ? "Connecting…" : connected ? "Disconnect" : "Connect"}
-          </button>
-        </div>
-      </div>
+      <ViewTopBar
+        icon={<Settings2 className="w-3.5 h-3.5" />}
+        title="Connection to AMQP Broker"
+      >
+        <button
+          onClick={toggle}
+          disabled={connecting}
+          className={`px-3.5 py-1.5 rounded-md text-[12px] font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shrink-0 flex items-center gap-1.5 ${
+            connected
+              ? "bg-red-500/10 border border-red-500/30 text-red-500 hover:bg-red-500/20"
+              : "bg-blue-600 hover:bg-blue-500 text-white"
+          }`}
+        >
+          {connecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : connected ? <Unplug className="w-3.5 h-3.5" /> : <Plug className="w-3.5 h-3.5" />}
+          {connecting ? "Connecting…" : connected ? "Disconnect" : "Connect"}
+        </button>
+      </ViewTopBar>
 
       {/* ─── TABS — Main / Advanced ─── */}
       <Tabs
@@ -314,7 +304,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
         {/* ─── PROFILE PICKER ROW ─── */}
         <div className="mb-4">
           <div className="flex items-center gap-2 mb-1.5 h-4">
-            <label className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest leading-none">Profile</label>
+            <SectionLabel className="leading-none">Profile</SectionLabel>
             {dirty && sel && !savingAs && !confirmDel && (
               <span className="text-[10px] text-amber-500 flex items-center gap-1 normal-case font-normal leading-none">
                 <span className="w-1 h-1 rounded-full bg-amber-500" /> Unsaved changes — click Save to update '{sel}'
@@ -323,52 +313,55 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
           </div>
           <div className="flex gap-1.5 items-stretch">
 
-            {/* Custom dropdown */}
-            <div ref={pickerRef} className="relative flex-1">
-              <button
-                onClick={() => setPickerOpen(o => !o)}
-                className="w-full flex items-center gap-2 bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[12px] text-t-ink hover:border-t-line2 transition-colors"
-              >
-                {sel ? (
-                  <>
-                    <span className="font-medium truncate">{sel}</span>
-                    {dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="Unsaved changes" />}
-                    <span className="ml-auto text-[11px] text-t-ink5 font-mono shrink-0">{loaded?.host}:{loaded?.port}</span>
-                  </>
-                ) : (
-                  <span className="text-t-ink4 italic">No profile — using current form</span>
-                )}
-                <ChevronDown className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
-              </button>
-
-              {pickerOpen && (
-                <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-t-card border border-t-line rounded-md shadow-lg overflow-hidden">
-                  {/* Profile list */}
-                  <div className="max-h-64 overflow-y-auto">
-                    {profiles.length === 0 ? (
-                      <p className="text-[11px] text-t-ink5 text-center py-4">No saved profiles</p>
-                    ) : profiles.map(p => (
-                      <button key={p.name}
-                        onClick={() => selectProfile(p)}
-                        className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors ${
-                          p.name === sel ? "bg-blue-500/5" : ""
-                        }`}>
-                        {p.name === sel ? <Check className="w-3 h-3 text-blue-500 shrink-0" /> : <span className="w-3 shrink-0" />}
-                        <span className="text-[12px] text-t-ink truncate">{p.name}</span>
-                        <span className="ml-auto text-[10px] text-t-ink5 font-mono shrink-0">{p.host}:{p.port}{p.use_tls && " · TLS"}</span>
-                      </button>
-                    ))}
-                  </div>
-                  {/* New profile at bottom */}
+            {/* Profile dropdown — full-width via shared Dropdown primitive */}
+            <div className="flex-1">
+              <Dropdown
+                width="w-full"
+                trigger={({ open, toggle }) => (
                   <button
+                    type="button"
+                    onClick={toggle}
+                    aria-expanded={open}
+                    className="w-full flex items-center gap-2 bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[12px] text-t-ink hover:border-t-line2 transition-colors"
+                  >
+                    {sel ? (
+                      <>
+                        <span className="font-medium truncate">{sel}</span>
+                        {dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="Unsaved changes" />}
+                        <span className="ml-auto text-[11px] text-t-ink5 font-mono shrink-0">{loaded?.host}:{loaded?.port}</span>
+                      </>
+                    ) : (
+                      <span className="text-t-ink4 italic">No profile — using current form</span>
+                    )}
+                    <ChevronDown className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
+                  </button>
+                )}
+              >
+                <div className="max-h-64 overflow-y-auto">
+                  {profiles.length === 0 ? (
+                    <p className="text-[11px] text-t-ink5 text-center py-4">No saved profiles</p>
+                  ) : profiles.map(p => (
+                    <DropdownItem
+                      key={p.name}
+                      active={p.name === sel}
+                      onClick={() => selectProfile(p)}
+                      trailing={`${p.host}:${p.port}${p.use_tls ? " · TLS" : ""}`}
+                    >
+                      {p.name}
+                    </DropdownItem>
+                  ))}
+                </div>
+                <DropdownFooter>
+                  <button
+                    type="button"
                     onClick={newProfile}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors border-t border-t-line text-blue-500"
+                    className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors text-blue-500"
                   >
                     <Plus className="w-3 h-3 shrink-0" />
                     <span className="text-[12px] font-medium">New profile</span>
                   </button>
-                </div>
-              )}
+                </DropdownFooter>
+              </Dropdown>
             </div>
 
             {/* Action buttons */}
@@ -384,7 +377,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
             <button
               onClick={() => startSaveAs()}
               title="Save as new profile"
-              className="px-2.5 py-1.5 rounded-md bg-t-card border border-t-line text-t-ink4 hover:text-t-ink hover:border-t-line2 transition-colors text-[11px] font-medium"
+              className="px-2.5 py-1.5 rounded-md bg-t-card border border-t-line text-t-ink4 hover:text-blue-500 hover:border-blue-500/50 transition-colors text-[11px] font-medium"
             >
               Save as…
             </button>
@@ -392,7 +385,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
               onClick={duplicateProfile}
               disabled={!sel}
               title="Duplicate"
-              className="px-2.5 py-1.5 rounded-md bg-t-card border border-t-line text-t-ink4 hover:text-t-ink hover:border-t-line2 disabled:opacity-30 transition-colors"
+              className="px-2.5 py-1.5 rounded-md bg-t-card border border-t-line text-t-ink4 hover:text-blue-500 hover:border-blue-500/50 disabled:opacity-30 disabled:hover:text-t-ink4 disabled:hover:border-t-line transition-colors"
             >
               <Copy className="w-3.5 h-3.5" />
             </button>
@@ -408,46 +401,54 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
 
           {/* Inline name prompt for "Save as…" / Duplicate */}
           {savingAs && (
-            <div className="mt-2 flex items-center gap-2 p-2 bg-blue-500/5 border border-blue-500/20 rounded-md">
-              <span className="text-[11px] text-blue-500 font-medium shrink-0">New profile name:</span>
-              <input
-                autoFocus
-                value={newName}
-                onChange={e => setNewName(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === "Enter") confirmSaveAs();
-                  if (e.key === "Escape") { setSavingAs(false); setNewName(""); }
-                }}
-                placeholder="Profile name…"
-                className={`${INPUT} flex-1`}
-              />
-              <button onClick={confirmSaveAs} disabled={!newName.trim()}
-                className="px-2.5 py-1.5 rounded-md bg-blue-600 text-white text-[11px] font-semibold hover:bg-blue-500 disabled:opacity-40 transition-colors">
-                Save
-              </button>
-              <button onClick={() => { setSavingAs(false); setNewName(""); }}
-                className="px-2 py-1.5 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover text-[11px] transition-colors">
-                Cancel
-              </button>
+            <div className="mt-2">
+              <Callout variant="info">
+                <div className="flex items-center gap-2">
+                  <span className="text-blue-500 font-medium shrink-0">New profile name:</span>
+                  <input
+                    autoFocus
+                    value={newName}
+                    onChange={e => setNewName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") confirmSaveAs();
+                      if (e.key === "Escape") { setSavingAs(false); setNewName(""); }
+                    }}
+                    placeholder="Profile name…"
+                    className={`${INPUT} flex-1`}
+                  />
+                  <button onClick={confirmSaveAs} disabled={!newName.trim()}
+                    className="px-2.5 py-1.5 rounded-md bg-blue-600 text-white text-[11px] font-semibold hover:bg-blue-500 disabled:opacity-40 transition-colors">
+                    Save
+                  </button>
+                  <button onClick={() => { setSavingAs(false); setNewName(""); }}
+                    className="px-2 py-1.5 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover text-[11px] transition-colors">
+                    Cancel
+                  </button>
+                </div>
+              </Callout>
             </div>
           )}
 
           {/* Inline delete confirmation */}
           {confirmDel && sel && (
-            <div className="mt-2 flex items-center gap-2 p-2 bg-red-500/5 border border-red-500/20 rounded-md">
-              <span className="text-[11px] text-red-500 font-medium shrink-0">
-                Delete profile '{sel}'?
-              </span>
-              <div className="ml-auto flex gap-1">
-                <button onClick={confirmDelete}
-                  className="px-2.5 py-1 rounded-md bg-red-500 text-white text-[11px] font-semibold hover:bg-red-600 transition-colors">
-                  Delete
-                </button>
-                <button onClick={() => setConfirmDel(false)}
-                  className="px-2 py-1 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover text-[11px] transition-colors">
-                  Cancel
-                </button>
-              </div>
+            <div className="mt-2">
+              <Callout variant="error">
+                <div className="flex items-center gap-2">
+                  <span className="text-red-500 font-medium shrink-0">
+                    Delete profile '{sel}'?
+                  </span>
+                  <div className="ml-auto flex gap-1">
+                    <button onClick={confirmDelete}
+                      className="px-2.5 py-1 rounded-md bg-red-500 text-white text-[11px] font-semibold hover:bg-red-600 transition-colors">
+                      Delete
+                    </button>
+                    <button onClick={() => setConfirmDel(false)}
+                      className="px-2 py-1 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover text-[11px] transition-colors">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </Callout>
             </div>
           )}
 
@@ -455,7 +456,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
 
         {/* Server section */}
         <div className="mb-4">
-          <span className="block text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Server</span>
+          <SectionLabel className="block mb-2">Server</SectionLabel>
           <div className="grid grid-cols-2 gap-3">
             <div><label className={LABEL}>Host <span className="text-red-500">*</span></label><input value={host} onChange={e => setHost(e.target.value)} placeholder="127.0.0.1" className={INPUT} /></div>
             <div><label className={LABEL}>Port <span className="text-red-500">*</span></label><input value={port} onChange={e => setPort(e.target.value)} placeholder="5672" className={INPUT} /></div>
@@ -464,7 +465,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
 
         {/* Auth section */}
         <div className="mb-4">
-          <span className="block text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Authentication</span>
+          <SectionLabel className="block mb-2">Authentication</SectionLabel>
           <div className="grid grid-cols-2 gap-3">
             <div><label className={LABEL}>Username</label><input value={username} disabled={saslAnonymous} onChange={e => setUsername(e.target.value)} placeholder="optional" className={`${INPUT} disabled:opacity-50`} /></div>
             <div><label className={LABEL}>Password</label><input type="password" value={password} disabled={saslAnonymous} onChange={e => setPassword(e.target.value)} placeholder="optional" className={`${INPUT} disabled:opacity-50`} /></div>
@@ -473,7 +474,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
 
         {/* Security section */}
         <div className="mb-4">
-          <span className="block text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Security</span>
+          <SectionLabel className="block mb-2">Security</SectionLabel>
 
           {/* TLS / AMQPS toggle card */}
           <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line mb-2">
@@ -481,20 +482,14 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
               <span className="text-[13px] text-t-ink2">TLS / AMQPS</span>
               <span className="text-[10px] text-t-ink5">Encrypt connection with TLS</span>
             </div>
-            <button
-              onClick={() => setUseTls(!useTls)}
-              style={{ height: "22px", width: "40px" }}
-              className={`relative rounded-full transition-colors shrink-0 ${useTls ? "bg-blue-600" : "bg-t-active"}`}
-            >
-              <span className={`absolute top-[3px] w-4 h-4 rounded-full bg-white shadow transition-all ${useTls ? "left-[21px]" : "left-[3px]"}`} />
-            </button>
+            <Toggle checked={useTls} onChange={setUseTls} ariaLabel="TLS / AMQPS" />
           </div>
 
           {/* Skip cert verification — sub-option, only when TLS on */}
           {useTls && (
             <label className="flex items-center gap-2 cursor-pointer text-[11px] text-t-ink3 px-2.5 mb-2">
               <input type="checkbox" checked={tlsSkipVerify} onChange={e => setTlsSkipVerify(e.target.checked)}
-                className="w-3 h-3 accent-blue-600 cursor-pointer" />
+                className="w-3.5 h-3.5 accent-blue-600 cursor-pointer" />
               Skip certificate verification
               <span className="text-amber-500 text-[10px]">(insecure — only for self-signed/test brokers)</span>
             </label>
@@ -506,13 +501,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
               <span className="text-[13px] text-t-ink2">Force SASL ANONYMOUS</span>
               <span className="text-[10px] text-t-ink5">Skip credentials and connect anonymously</span>
             </div>
-            <button
-              onClick={() => setSaslAnonymous(!saslAnonymous)}
-              style={{ height: "22px", width: "40px" }}
-              className={`relative rounded-full transition-colors shrink-0 ${saslAnonymous ? "bg-blue-600" : "bg-t-active"}`}
-            >
-              <span className={`absolute top-[3px] w-4 h-4 rounded-full bg-white shadow transition-all ${saslAnonymous ? "left-[21px]" : "left-[3px]"}`} />
-            </button>
+            <Toggle checked={saslAnonymous} onChange={setSaslAnonymous} ariaLabel="Force SASL ANONYMOUS" />
           </div>
         </div>
         </>}
@@ -526,7 +515,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
 
         {/* Connection options */}
         <div className="mb-4">
-          <span className="block text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Connection options</span>
+          <SectionLabel className="block mb-2">Connection options</SectionLabel>
           <div className="space-y-3">
             <div>
               <label className={LABEL}>
@@ -598,10 +587,10 @@ function ActivityPanel({ logs, bottomRef }: { logs: LogEntry[]; bottomRef: React
   return (
     <div className="shrink-0 border-t border-t-line bg-t-panel">
       <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] font-semibold text-t-ink4 uppercase tracking-widest hover:text-t-ink2 transition-colors">
-        <Activity className="w-3 h-3" />
-        Activity
-        <span className="ml-auto normal-case text-[10px] font-normal text-t-ink5">
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-t-hover/50 transition-colors">
+        <SectionLabel icon={<Activity className="w-3 h-3" />}>Activity</SectionLabel>
+        <span className="ml-auto text-[10px] text-t-ink5">
           {filtered.length} event{filtered.length !== 1 ? "s" : ""}{!open && " — click to expand"}
         </span>
       </button>
@@ -611,13 +600,17 @@ function ActivityPanel({ logs, bottomRef }: { logs: LogEntry[]; bottomRef: React
             <p className="text-[11px] text-t-ink5 text-center py-4">No connection events yet</p>
           ) : (
             <>
-              {filtered.map(entry => (
-                <div key={entry.id} className="flex items-center gap-2 text-[11px] leading-5">
-                  <span className="text-t-ink5 shrink-0 font-mono">{entry.ts}</span>
-                  {LOG_ICON[entry.kind]}
-                  <span className={`${LOG_COLOR[entry.kind]} break-all`}>{entry.text}</span>
-                </div>
-              ))}
+              {filtered.map(entry => {
+                const d = new Date(entry.tsMs);
+                const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+                return (
+                  <div key={entry.id} className="flex items-center gap-2 text-[11px] leading-5">
+                    <span className="text-t-ink5 shrink-0 font-mono">{time}</span>
+                    {LOG_ICON[entry.kind]}
+                    <span className={`${LOG_COLOR[entry.kind]} break-all`}>{entry.text}</span>
+                  </div>
+                );
+              })}
               <div ref={bottomRef} />
             </>
           )}

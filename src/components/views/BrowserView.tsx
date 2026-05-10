@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Radar, RotateCcw, Inbox, Send, X, Loader2, Eye,
-  Copy, Tag, MessageSquare, Search,
+  Tag, MessageSquare, Search, Trash2, AlertTriangle,
 } from "lucide-react";
 import CollapsibleSection from "../CollapsibleSection";
 import PropsList from "../PropsList";
 import EmptyState from "../EmptyState";
+import ViewTopBar from "../ViewTopBar";
+import CopyButton from "../CopyButton";
 import { fmtBytes } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
@@ -76,6 +78,9 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
   const [peekErr,       setPeekErr]       = useState<string | null>(null);
   const [peekMax,       setPeekMax]       = useState(PEEK_DEFAULT_MAX);
   const [openMessageIdx, setOpenMessageIdx] = useState<number | null>(null);
+  /** Set to a queue address while a Purge-confirm modal is open for it. */
+  const [purgeConfirm,  setPurgeConfirm]  = useState<string | null>(null);
+  const [purging,       setPurging]       = useState(false);
 
   // ─── Auto-refresh queue list (cheap call: only metrics, no message bodies) ──
   useEffect(() => {
@@ -144,6 +149,27 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
     setOpenMessageIdx(null);
   }
 
+  /**
+   * Invoke the destructive `purge_queue` Tauri command. Caller is expected
+   * to have already shown a confirm dialog. On success we re-peek to show
+   * the (now empty) queue so the user immediately sees the result.
+   */
+  async function purgeQueue(queue: string) {
+    setPurging(true);
+    try {
+      const removed = await invoke<number>("purge_queue", { queue });
+      onLog("ok", `Purged ${removed} message${removed !== 1 ? "s" : ""} from '${queue}'`);
+      setPurgeConfirm(null);
+      // Refresh both: the queue list (msg count went to 0) and the peek pane.
+      await refreshQueues(true);
+      await peekQueue(queue);
+    } catch (e) {
+      onLog("err", `Purge failed: ${e}`);
+    } finally {
+      setPurging(false);
+    }
+  }
+
   function toggleSort(key: SortKey) {
     if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortKey(key); setSortDir("asc"); }
@@ -176,17 +202,15 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
       {/* ─── TOP BAR ─── */}
-      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <Radar className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
-        <span className="text-[13px] font-semibold text-t-ink">Broker Browser</span>
-        {loaded && (
-          <span className="text-[11px] text-t-ink5 font-mono">
-            {filtered.length === queues.length ? `${queues.length} queue${queues.length !== 1 ? "s" : ""}` : `${filtered.length} / ${queues.length}`}
-          </span>
-        )}
-
-        {/* Live / poll-error indicator — same shape as SubscriberView's session strip */}
-        {connected && autoOn && pollErr ? (
+      <ViewTopBar
+        icon={<Radar className="w-3.5 h-3.5" />}
+        title="Broker Browser"
+        count={loaded ? (
+          filtered.length === queues.length
+            ? `${queues.length} queue${queues.length !== 1 ? "s" : ""}`
+            : `${filtered.length} / ${queues.length}`
+        ) : null}
+        status={connected && autoOn && pollErr ? (
           <span className="flex items-center gap-1 text-[10px] text-amber-500 font-mono" title={`Polling error: ${pollErr}`}>
             <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
             poll error
@@ -197,33 +221,32 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
             live
           </span>
         ) : null}
-
-        <div className="flex items-center gap-1 ml-auto">
-          {/* Pill toggles in the SubscriberView style — replaces native checkboxes */}
-          <button
-            onClick={() => setAutoOn(a => !a)}
-            className={`text-[11px] transition-colors px-1.5 py-0.5 rounded ${
-              autoOn ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink3"
-            }`}
-            title={autoOn ? "Auto-refresh on — click to pause" : "Auto-refresh paused"}
-          >
-            {autoOn ? "● auto" : "○ auto"}
-          </button>
-          <button
-            onClick={() => setHideEmpty(h => !h)}
-            className={`text-[11px] transition-colors px-1.5 py-0.5 rounded ${
-              hideEmpty ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink3"
-            }`}
-            title="Hide queues with zero messages"
-          >
-            Hide empty
-          </button>
-          <button onClick={() => refreshQueues(false)} disabled={!connected || loading}
-            className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1 disabled:opacity-40">
-            <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
-          </button>
-        </div>
-      </div>
+      >
+        <button
+          onClick={() => setAutoOn(a => !a)}
+          aria-pressed={autoOn}
+          className={`text-[11px] transition-colors px-1.5 py-0.5 rounded ${
+            autoOn ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink3"
+          }`}
+          title={autoOn ? "Auto-refresh on — click to pause" : "Auto-refresh paused"}
+        >
+          {autoOn ? "● auto" : "○ auto"}
+        </button>
+        <button
+          onClick={() => setHideEmpty(h => !h)}
+          aria-pressed={hideEmpty}
+          className={`text-[11px] transition-colors px-1.5 py-0.5 rounded ${
+            hideEmpty ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink3"
+          }`}
+          title="Hide queues with zero messages"
+        >
+          Hide empty
+        </button>
+        <button onClick={() => refreshQueues(false)} disabled={!connected || loading}
+          className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1 disabled:opacity-40">
+          <RotateCcw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} /> Refresh
+        </button>
+      </ViewTopBar>
 
       {/* ─── FILTER BAR — only when there are queues to filter ─── */}
       {loaded && queues.length > 0 && (
@@ -346,6 +369,16 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors">
                   <RotateCcw className={`w-3 h-3 ${peekLoading ? "animate-spin" : ""}`} /> Refresh
                 </button>
+                <button
+                  onClick={() => setPurgeConfirm(selectedQueue)}
+                  disabled={messages.length === 0 || peekLoading}
+                  title={messages.length === 0
+                    ? "Queue is empty — nothing to purge"
+                    : "Permanently delete all messages from this queue"}
+                  className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent"
+                >
+                  <Trash2 className="w-3 h-3" /> Purge
+                </button>
                 <button onClick={closePeek}
                   title="Close peek"
                   className="p-1 rounded text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors">
@@ -411,6 +444,73 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
           </div>
         )}
       </div>
+
+      {/* ─── PURGE CONFIRM MODAL ─── */}
+      {purgeConfirm && (
+        <PurgeConfirmModal
+          queue={purgeConfirm}
+          messageCount={queues.find(q => q.address === purgeConfirm)?.message_count ?? messages.length}
+          purging={purging}
+          onConfirm={() => purgeQueue(purgeConfirm)}
+          onCancel={() => setPurgeConfirm(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PurgeConfirmModal({ queue, messageCount, purging, onConfirm, onCancel }: {
+  queue: string;
+  messageCount: number;
+  purging: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onCancel}>
+      <div onClick={e => e.stopPropagation()}
+        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[460px] max-w-[90vw] flex flex-col overflow-hidden">
+
+        <div className="shrink-0 px-4 py-2.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-red-500" />
+          <span className="text-[13px] font-semibold text-t-ink">Purge queue</span>
+          <button onClick={onCancel} className="ml-auto p-1 rounded hover:bg-t-hover text-t-ink4 hover:text-t-ink">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="px-4 py-3 space-y-2 text-[13px] text-t-ink2">
+          <p>
+            Permanently delete <span className="font-mono font-bold text-t-ink">{messageCount.toLocaleString()}</span>{" "}
+            message{messageCount !== 1 ? "s" : ""} from queue{" "}
+            <span className="font-mono text-blue-500">{queue}</span>?
+          </p>
+          <p className="text-[11px] text-t-ink5">
+            This calls Artemis's <code className="text-t-ink4">removeAllMessages</code> management
+            operation. The action cannot be undone — drained messages do <em>not</em> go to the DLQ.
+          </p>
+        </div>
+
+        <div className="shrink-0 px-3 py-2 border-t border-t-line bg-t-panel flex items-center justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={purging}
+            className="px-3 py-1 rounded-md text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={purging}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-red-500 hover:bg-red-600 text-white text-[11px] font-semibold transition-colors disabled:opacity-40"
+          >
+            {purging ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+            {purging ? "Purging…" : `Delete ${messageCount.toLocaleString()} message${messageCount !== 1 ? "s" : ""}`}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -450,7 +550,11 @@ function MessageDetails({ msg, idx, onLog }: { msg: PeekedMessage; idx: number; 
   // Reset body view-mode when switching message
   useEffect(() => { setBodyMode("auto"); }, [idx]);
 
-  const appProps = Object.entries(msg.application_properties);
+  // Rust's HashMap doesn't preserve insertion order, so sort alphabetically
+  // for a stable display — otherwise the same message peeked twice can show
+  // its properties in different orders, which looks like a UI bug.
+  const appProps = Object.entries(msg.application_properties)
+    .sort(([a], [b]) => a.localeCompare(b));
   const detected = detectFormat({ contentType: msg.content_type, bodyText: msg.body_text });
 
   const bodyContent = (() => {
@@ -530,14 +634,12 @@ function MessageDetails({ msg, idx, onLog }: { msg: PeekedMessage; idx: number; 
               ))}
             </div>
             {msg.body_text && (
-              <button onClick={(e) => {
-                e.stopPropagation();
-                navigator.clipboard.writeText(msg.body_text!);
-                onLog("info", "Body copied");
-              }}
-                className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover">
-                <Copy className="w-3 h-3" /> Copy
-              </button>
+              <CopyButton
+                value={msg.body_text}
+                onCopied={() => onLog("info", "Body copied")}
+                label="Copy"
+                className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover"
+              />
             )}
           </div>
         }

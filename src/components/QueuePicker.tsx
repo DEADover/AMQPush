@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, RotateCcw, Radar, X, AlertCircle, Check } from "lucide-react";
+import SectionLabel from "./SectionLabel";
 
 interface BrokerQueue {
   name: string;
@@ -94,7 +95,7 @@ export default function QueuePicker({
           onFocus={() => setOpen(true)}
           placeholder={placeholder}
           disabled={disabled}
-          className="w-full bg-t-field border border-t-line2 rounded-md pl-3 pr-14 py-2 text-sm text-t-ink font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5 disabled:opacity-50"
+          className="w-full bg-t-field border border-t-line2 rounded-md pl-2.5 pr-12 py-1.5 text-[12px] text-t-ink font-mono outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5 disabled:opacity-50"
         />
         {!disabled && value && (
           <button
@@ -102,9 +103,9 @@ export default function QueuePicker({
             tabIndex={-1}
             onClick={() => { onChange(""); setOpen(true); }}
             title="Clear"
-            className="absolute right-7 top-1/2 -translate-y-1/2 text-t-ink5 hover:text-t-ink2 transition-colors"
+            className="absolute right-6 top-1/2 -translate-y-1/2 text-t-ink5 hover:text-t-ink2 transition-colors"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="w-3 h-3" />
           </button>
         )}
         {!disabled && (
@@ -112,7 +113,7 @@ export default function QueuePicker({
             type="button"
             tabIndex={-1}
             onClick={() => setOpen(o => !o)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-t-ink4 hover:text-t-ink2 transition-colors"
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-t-ink4 hover:text-t-ink2 transition-colors"
           >
             <ChevronDown className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
           </button>
@@ -121,14 +122,13 @@ export default function QueuePicker({
 
       {/* DROPDOWN */}
       {open && !disabled && (
-        <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-t-card border border-t-line rounded-lg shadow-xl overflow-hidden">
+        <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-t-card border border-t-line rounded-md shadow-lg overflow-hidden">
 
           {/* Top bar — status + refresh */}
           <div className="flex items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel">
-            <Radar className="w-3 h-3 text-t-ink4 shrink-0" />
-            <span className="text-[10px] uppercase tracking-wider text-t-ink4 font-semibold">
+            <SectionLabel icon={<Radar className="w-3 h-3" />}>
               {connected ? "Broker queues" : "Not connected"}
-            </span>
+            </SectionLabel>
             {showLiveBadge && (
               <span className="text-[10px] text-t-ink5 font-mono">{brokerQueues.length}</span>
             )}
@@ -138,6 +138,7 @@ export default function QueuePicker({
               disabled={!connected || brokerLoading}
               className="ml-auto p-1 text-t-ink4 hover:text-blue-500 transition-colors disabled:opacity-40"
               title={connected ? "Refresh queue list" : "Connect to a broker first"}
+              aria-label="Refresh broker queue list"
             >
               <RotateCcw className={`w-3 h-3 ${brokerLoading ? "animate-spin" : ""}`} />
             </button>
@@ -153,11 +154,11 @@ export default function QueuePicker({
 
           {/* Table header — visible when there are entries */}
           {filtered.length > 0 && (
-            <div className="grid grid-cols-[1fr_50px_50px_50px_18px] items-center gap-2 px-3 py-1 border-b border-t-line bg-t-panel/60 text-[10px] uppercase tracking-wider text-t-ink5 font-semibold">
-              <div>Name</div>
-              <div className="text-center">Type</div>
-              <div className="text-right">Msgs</div>
-              <div className="text-right">Cons</div>
+            <div className="grid grid-cols-[1fr_50px_50px_50px_18px] items-center gap-2 px-3 py-1 border-b border-t-line bg-t-panel/60">
+              <SectionLabel>Name</SectionLabel>
+              <SectionLabel className="justify-center">Type</SectionLabel>
+              <SectionLabel className="justify-end">Msgs</SectionLabel>
+              <SectionLabel className="justify-end">Cons</SectionLabel>
               <div></div>
             </div>
           )}
@@ -173,11 +174,12 @@ export default function QueuePicker({
                 const isCurrent = value === it.address;
                 const isAddress = it.kind === "address";
                 return (
-                  <div key={it.address}
-                    className={`grid grid-cols-[1fr_50px_50px_50px_18px] items-center gap-2 px-3 py-1.5 border-b border-t-line/40 transition-colors cursor-pointer ${
-                      isCurrent ? "bg-blue-500/10" : "hover:bg-t-hover/60"
-                    }`}
+                  <button key={it.address}
+                    type="button"
                     onClick={() => { onChange(it.address); setOpen(false); }}
+                    className={`w-full text-left grid grid-cols-[1fr_50px_50px_50px_18px] items-center gap-2 px-3 py-1.5 border-b border-t-line/40 transition-colors outline-none focus-visible:ring-1 focus-visible:ring-blue-500/40 focus-visible:ring-inset ${
+                      isCurrent ? "bg-blue-500/10" : "hover:bg-t-hover/50"
+                    }`}
                   >
                     {/* Name */}
                     <span className="text-[12px] font-mono text-t-ink truncate" title={it.address}>
@@ -217,7 +219,7 @@ export default function QueuePicker({
                     <span className="flex justify-center">
                       {isCurrent && <Check className="w-3 h-3 text-blue-500" />}
                     </span>
-                  </div>
+                  </button>
                 );
               })
             )}

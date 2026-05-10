@@ -1,5 +1,8 @@
 import { useEffect, useState, useMemo } from "react";
 import { BarChart2, Send, Inbox, Clock, Zap, FileText, Layers, AlertTriangle, TrendingUp, Activity, ShieldCheck } from "lucide-react";
+import ViewTopBar from "../ViewTopBar";
+import SectionLabel from "../SectionLabel";
+import EmptyState from "../EmptyState";
 
 export interface QueueStat {
   count: number;
@@ -220,15 +223,16 @@ export default function StatsView({ stats }: Props) {
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
       {/* ─── TOP BAR ─── */}
-      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <BarChart2 className="w-3.5 h-3.5 text-t-ink4 shrink-0" />
-        <span className="text-[13px] font-semibold text-t-ink">Session Statistics</span>
-        <span className="text-[11px] text-t-ink5 font-mono">{elapsed(stats.sessionStart)}</span>
-        <span className="text-[11px] text-t-ink5 font-mono ml-auto">
+      <ViewTopBar
+        icon={<BarChart2 className="w-3.5 h-3.5" />}
+        title="Session Statistics"
+        count={elapsed(stats.sessionStart)}
+      >
+        <span className="text-[11px] text-t-ink5 font-mono">
           ↑{stats.sentCount.toLocaleString()} ↓{stats.receivedCount.toLocaleString()}
           {stats.sendErrorCount > 0 && <span className="text-red-500 ml-2">⚠ {stats.sendErrorCount}</span>}
         </span>
-      </div>
+      </ViewTopBar>
 
       {/* ─── CONTENT ─── */}
       <div className="flex-1 overflow-y-auto min-h-0 p-3 space-y-3">
@@ -310,16 +314,16 @@ export default function StatsView({ stats }: Props) {
         <Section title="Distribution" icon={<Activity className="w-3.5 h-3.5" />}>
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-t-card border border-t-line rounded-lg p-3">
-              <p className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Sent message size</p>
+              <SectionLabel className="block mb-2">Sent message size</SectionLabel>
               <SizeBar stats={sentSizeStats} />
             </div>
             <div className="bg-t-card border border-t-line rounded-lg p-3">
-              <p className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Received message size</p>
+              <SectionLabel className="block mb-2">Received message size</SectionLabel>
               <SizeBar stats={recvSizeStats} />
             </div>
             {kindEntries.length > 0 && (
               <div className="col-span-2 bg-t-card border border-t-line rounded-lg p-3">
-                <p className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">Sent by content type</p>
+                <SectionLabel className="block mb-2">Sent by content type</SectionLabel>
                 <KindBar entries={kindEntries} total={stats.sentCount} />
               </div>
             )}
@@ -331,11 +335,11 @@ export default function StatsView({ stats }: Props) {
           <Section title="Issues" icon={<AlertTriangle className="w-3.5 h-3.5 text-amber-500" />}>
             <div className="bg-t-card border border-t-line rounded-lg p-3 grid grid-cols-2 gap-3 text-[12px]">
               <div>
-                <p className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-1">Send errors</p>
+                <SectionLabel className="block mb-1">Send errors</SectionLabel>
                 <p className="text-xl font-bold font-mono text-red-500">{stats.sendErrorCount}</p>
               </div>
               <div>
-                <p className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-1">Reconnects</p>
+                <SectionLabel className="block mb-1">Reconnects</SectionLabel>
                 <p className="text-xl font-bold font-mono text-amber-500">{stats.reconnectCount}</p>
               </div>
             </div>
@@ -343,9 +347,11 @@ export default function StatsView({ stats }: Props) {
         )}
 
         {empty && (
-          <p className="text-center text-[13px] text-t-ink5 py-12">
-            Send or receive messages to see statistics.
-          </p>
+          <EmptyState
+            icon={<BarChart2 className="w-8 h-8" />}
+            title="No statistics yet"
+            subtitle="Send or receive messages to see throughput, distribution and reliability."
+          />
         )}
       </div>
     </div>
@@ -359,7 +365,7 @@ function Card({ icon, label, value, sub, footer }: { icon: React.ReactNode; labe
     <div className="bg-t-card border border-t-line rounded-lg p-3 flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
         {icon}
-        <span className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest truncate">{label}</span>
+        <SectionLabel className="truncate">{label}</SectionLabel>
       </div>
       <p className="text-2xl font-bold text-t-ink font-mono leading-none mt-1">{value}</p>
       {sub && <p className="text-[11px] text-t-ink4 mt-1 truncate">{sub}</p>}
@@ -371,10 +377,7 @@ function Card({ icon, label, value, sub, footer }: { icon: React.ReactNode; labe
 function Section({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <div>
-      <div className="flex items-center gap-1.5 mb-2 text-t-ink4">
-        {icon}
-        <span className="text-[10px] font-bold uppercase tracking-widest">{title}</span>
-      </div>
+      <SectionLabel icon={icon} className="mb-2">{title}</SectionLabel>
       {children}
     </div>
   );
@@ -385,7 +388,7 @@ function Sparkline({ buckets, label, color, rate, count }: { buckets: number[]; 
   return (
     <div className="bg-t-card border border-t-line rounded-lg p-3">
       <div className="flex items-baseline justify-between mb-2">
-        <span className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest">{label}</span>
+        <SectionLabel>{label}</SectionLabel>
         <span className="text-[11px] font-mono text-t-ink2">
           <span className="text-[14px] font-bold text-t-ink">{rateLabel(rate)}</span>
           <span className="text-t-ink5 ml-1">· {count.toLocaleString()} total</span>
@@ -415,9 +418,9 @@ function QueueLeaderboard({ title, entries, totalCount, accent }: {
   const accentBg = accent === "blue" ? "bg-blue-500" : "bg-green-500";
   return (
     <div className="bg-t-card border border-t-line rounded-lg p-3">
-      <p className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest mb-2">{title}</p>
+      <SectionLabel className="block mb-2">{title}</SectionLabel>
       {entries.length === 0 ? (
-        <p className="text-[11px] text-t-ink5 italic py-2">No data yet</p>
+        <p className="text-[11px] text-t-ink5 py-2">No data yet</p>
       ) : (
         <div className="space-y-1.5">
           {entries.map(([name, st]) => {
@@ -444,7 +447,7 @@ function QueueLeaderboard({ title, entries, totalCount, accent }: {
 }
 
 function SizeBar({ stats }: { stats: { min: number; max: number; avg: number } | null }) {
-  if (!stats) return <p className="text-[11px] text-t-ink5 italic py-2">No data yet</p>;
+  if (!stats) return <p className="text-[11px] text-t-ink5 py-2">No data yet</p>;
   const range = stats.max - stats.min;
   const avgPct = range > 0 ? ((stats.avg - stats.min) / range) * 100 : 50;
   return (

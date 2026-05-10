@@ -1,6 +1,6 @@
 [package]
 name = "amqpush"
-version = "1.1.0"
+version = "1.2.0"
 description = "AMQPush — AMQP 1.0 desktop client"
 authors = ["sgryzhin"]
 edition = "2021"
@@ -22,6 +22,9 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Used by build.rs to stamp a `ddMMyyyy` build date into the binary via an
+# env var, which the About menu shows in parentheses next to the version.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -38,4 +41,15 @@ uuid = { version = "1.23.1", features = ["v4"] }
 dirs = "6.0.0"
 chrono = "0.4.44"
 base64 = "0.22.1"
+
+# macOS-only — used to set the Dock / About-dialog icon at runtime so dev-mode
+# (raw binary, no .app bundle) shows the AMQPush logo instead of the generic
+# blue-folder placeholder. Production .app builds also benefit by ensuring the
+# Dock icon matches the bundle icon even on cold-start animations. Tauri
+# already pulls these crates transitively at the same versions, so adding
+# them as direct deps adds zero extra compile cost.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.3", features = ["NSData", "NSThread"] }
 

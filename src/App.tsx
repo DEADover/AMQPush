@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { Sun, Moon, Monitor, Plug, ChevronDown, Check, User, Terminal } from "lucide-react";
+import { Sun, Moon, Monitor, Plug, ChevronDown, User, Terminal, HelpCircle } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import ConnectionView from "./components/views/ConnectionView";
 import PublisherView from "./components/views/PublisherView";
@@ -8,13 +8,18 @@ import HistoryView from "./components/views/HistoryView";
 import StatsView, { StatsData, emptyStats, trackSentInStats, trackReceivedInStats, trackSendErrorInStats } from "./components/views/StatsView";
 import ConsoleView from "./components/views/ConsoleView";
 import BrowserView from "./components/views/BrowserView";
+import Dropdown, { DropdownItem, DropdownSection, DropdownFooter } from "./components/Dropdown";
+import CommandPalette, { PaletteAction } from "./components/CommandPalette";
+import HelpModal from "./components/HelpModal";
 import { useTheme } from "./hooks/useTheme";
 import { LogEntry, View, Profile } from "./types";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { checkForUpdate, dismissUpdate, UpdateInfo } from "./utils/updateCheck";
+import { Sparkles, Download as DownloadIcon } from "lucide-react";
 import "./App.css";
 
 let logId = 0;
-function ts() { return new Date().toTimeString().slice(0, 8); }
 
 const VIEW_KEYS: Record<string, View> = {
   "1": "connection", "2": "publisher", "3": "subscriber", "4": "browser",
@@ -41,11 +46,24 @@ export default function App() {
     try {
       const raw = localStorage.getItem("amqpush.logs");
       if (!raw) return [];
-      const parsed = JSON.parse(raw) as LogEntry[];
+      const parsed = JSON.parse(raw) as Array<LogEntry & { ts?: string }>;
+      // Migrate legacy entries that only had `ts: "HH:MM:SS"` and no `tsMs`.
+      // We can't recover the original date, so we synthesise today's date at
+      // the recorded time — at least sorting and filtering remain coherent.
+      const migrated: LogEntry[] = parsed.map(l => {
+        if (typeof l.tsMs === "number" && l.tsMs > 0) return l as LogEntry;
+        const m = typeof l.ts === "string" && /^(\d{1,2}):(\d{2}):(\d{2})$/.exec(l.ts);
+        if (m) {
+          const d = new Date();
+          d.setHours(+m[1], +m[2], +m[3], 0);
+          return { ...l, tsMs: d.getTime() };
+        }
+        return { ...l, tsMs: 0 };
+      });
       // Bring logId past restored entries to avoid duplicate ids
-      const maxId = parsed.reduce((m, l) => Math.max(m, l.id ?? 0), 0);
+      const maxId = migrated.reduce((m, l) => Math.max(m, l.id ?? 0), 0);
       logId = maxId;
-      return parsed;
+      return migrated;
     } catch { return []; }
   });
   const [sendTrigger,    setSendTrigger]    = useState(0);
@@ -93,7 +111,7 @@ export default function App() {
   }
 
   const addLog = useCallback((kind: LogEntry["kind"], text: string) => {
-    setLogs(prev => [...prev.slice(-499), { id: ++logId, ts: ts(), kind, text }]);
+    setLogs(prev => [...prev.slice(-499), { id: ++logId, tsMs: Date.now(), kind, text }]);
   }, []);
 
   // Persist logs to localStorage — debounced, last 500 entries only
@@ -126,6 +144,20 @@ export default function App() {
   // Global keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Bare-key `?` opens Help, but only when the user isn't typing into a
+      // form field / editor — otherwise it would swallow the literal "?".
+      if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const t = e.target as HTMLElement | null;
+        const tag = t?.tagName;
+        const editable = tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable
+          || !!t?.closest?.(".cm-editor"); // CodeMirror catches its own keys, but be defensive
+        if (!editable) {
+          e.preventDefault();
+          setShowHelp(true);
+          return;
+        }
+      }
+
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
 
@@ -139,11 +171,33 @@ export default function App() {
       if (e.key === "l") {
         e.preventDefault();
         changeView(view === "console" ? prevView : "console");
+        return;
+      }
+      // Cmd+K: open command palette
+      if (e.key === "k") {
+        e.preventDefault();
+        setPaletteOpen(o => !o);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [view, prevView]);
+
+  // Suppress the WebView's default behaviour of navigating to dropped files.
+  // Tauri's OS-level drag-drop interception is disabled (see tauri.conf.json
+  // `dragDropEnabled: false`) so HTML5 drag events fire normally — without
+  // this guard the entire WebView would replace itself with the dropped file
+  // when it lands outside any registered dropzone.
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => e.preventDefault();
+    const onDrop     = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
 
   function handleConnected(addr: string) { setConnected(true); setDefaultAddress(addr); setStats(emptyStats()); }
   function handleResend(arg: { address: string; body?: string; fileName?: string; fileDataB64?: string; properties?: Record<string, string>; correlationId?: string }) {
@@ -238,23 +292,24 @@ export default function App() {
     })();
   }, [profiles]);
 
-  // ─── Dropdown state for header (profile + theme) ──────────────────────────
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [themeMenuOpen,   setThemeMenuOpen]   = useState(false);
-  const profileMenuRef = useRef<HTMLDivElement>(null);
-  const themeMenuRef   = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    function onClick(e: MouseEvent) {
-      if (profileMenuRef.current && !profileMenuRef.current.contains(e.target as Node)) setProfileMenuOpen(false);
-      if (themeMenuRef.current   && !themeMenuRef.current.contains(e.target as Node))   setThemeMenuOpen(false);
-    }
-    if (profileMenuOpen || themeMenuOpen) {
-      document.addEventListener("mousedown", onClick);
-      return () => document.removeEventListener("mousedown", onClick);
-    }
-  }, [profileMenuOpen, themeMenuOpen]);
-
   const themeOption = THEME_OPTIONS.find(t => t.id === mode) ?? THEME_OPTIONS[2];
+
+  // ─── Update notification (one-time check on app start) ───────────────────
+  // We hit GitHub's `/releases/latest` endpoint, compare with the running
+  // version, and stash an `UpdateInfo` if something newer exists. The button
+  // in the header opens the changelog modal; "Dismiss for this version"
+  // suppresses the notification permanently for that release.
+  const [updateInfo,    setUpdateInfo]    = useState<UpdateInfo | null>(null);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [paletteOpen,   setPaletteOpen]   = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    checkForUpdate().then(info => {
+      if (!cancelled) setUpdateInfo(info);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const publisherView = (
     <PublisherView
@@ -295,48 +350,48 @@ export default function App() {
         {/* ─── LEFT: Profile + Connection state ─── */}
         <div className="flex items-center gap-2">
           {/* Profile picker — globally visible across all views */}
-          <div ref={profileMenuRef} className="relative">
-            <button
-              onClick={() => setProfileMenuOpen(o => !o)}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-t-ink3 hover:text-t-ink hover:bg-t-hover transition-colors text-[12px] border border-t-line"
-              title="Switch broker profile"
-            >
-              <User className="w-3 h-3 text-t-ink4" />
-              <span className="font-medium">{activeProfile || <span className="italic text-t-ink5">no profile</span>}</span>
-              <ChevronDown className="w-3 h-3 text-t-ink4" />
-            </button>
-            {profileMenuOpen && (
-              <div className="absolute left-0 top-full mt-1 z-50 w-72 bg-t-card border border-t-line rounded-md shadow-lg overflow-hidden">
-                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-t-ink5 font-semibold border-b border-t-line">
-                  Broker profile
-                </div>
-                <div className="max-h-72 overflow-y-auto py-1">
-                  {profiles.length === 0 ? (
-                    <p className="text-[11px] text-t-ink5 text-center py-3">No saved profiles</p>
-                  ) : profiles.map(p => (
-                    <button key={p.name}
-                      onClick={() => { applyProfile(p); setProfileMenuOpen(false); }}
-                      className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors ${
-                        p.name === activeProfile ? "bg-blue-500/5" : ""
-                      }`}>
-                      {p.name === activeProfile
-                        ? <Check className="w-3 h-3 text-blue-500 shrink-0" />
-                        : <span className="w-3 shrink-0" />}
-                      <span className="text-[12px] text-t-ink truncate">{p.name}</span>
-                      <span className="ml-auto text-[10px] text-t-ink5 font-mono shrink-0">{p.host}:{p.port}{p.use_tls ? " · TLS" : ""}</span>
-                    </button>
-                  ))}
-                </div>
-                <button
-                  onClick={() => { changeView("connection"); setProfileMenuOpen(false); }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors border-t border-t-line text-[12px] text-blue-500"
-                >
-                  <Plug className="w-3 h-3" />
-                  Manage profiles…
-                </button>
-              </div>
+          <Dropdown
+            align="left"
+            width="w-72"
+            trigger={({ open, toggle }) => (
+              <button
+                type="button"
+                onClick={toggle}
+                aria-expanded={open}
+                aria-label="Switch broker profile"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-t-ink3 hover:text-t-ink hover:bg-t-hover transition-colors text-[12px] border border-t-line"
+                title="Switch broker profile"
+              >
+                <User className="w-3 h-3 text-t-ink4" />
+                <span className="font-medium">{activeProfile || <span className="italic text-t-ink5">no profile</span>}</span>
+                <ChevronDown className="w-3 h-3 text-t-ink4" />
+              </button>
             )}
-          </div>
+          >
+            <DropdownSection title="Broker profile">
+              {profiles.length === 0
+                ? <p className="text-[11px] text-t-ink5 text-center py-3">No saved profiles</p>
+                : profiles.map(p => (
+                    <DropdownItem
+                      key={p.name}
+                      active={p.name === activeProfile}
+                      onClick={() => applyProfile(p)}
+                      trailing={`${p.host}:${p.port}${p.use_tls ? " · TLS" : ""}`}
+                    >
+                      {p.name}
+                    </DropdownItem>
+                  ))}
+            </DropdownSection>
+            <DropdownFooter>
+              <button
+                onClick={() => changeView("connection")}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors text-[12px] text-blue-500 hover:text-blue-400"
+              >
+                <Plug className="w-3 h-3" />
+                Manage profiles…
+              </button>
+            </DropdownFooter>
+          </Dropdown>
 
           {/* Connection status */}
           <div className="flex items-center gap-1.5 px-2">
@@ -353,6 +408,17 @@ export default function App() {
             <span className="text-[11px] text-t-ink5 font-mono">
               ↑{stats.sentCount} ↓{stats.receivedCount}
             </span>
+          )}
+
+          {updateInfo && (
+            <button
+              onClick={() => setShowUpdateModal(true)}
+              title={`Version ${updateInfo.latest} is available — click to view changelog`}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] border border-blue-500/40 text-blue-500 bg-blue-500/10 hover:bg-blue-500/20 transition-colors"
+            >
+              <Sparkles className="w-3 h-3" />
+              <span>v{updateInfo.latest}</span>
+            </button>
           )}
 
           {view !== "console" && (
@@ -376,40 +442,52 @@ export default function App() {
             </button>
           )}
 
+          {/* Help — opens the in-app guide */}
+          <button
+            type="button"
+            onClick={() => setShowHelp(true)}
+            title="Help — open the in-app guide  (?)"
+            aria-label="Help"
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors text-[12px]"
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Help</span>
+          </button>
+
           {/* Theme dropdown — explicit options instead of cycling */}
-          <div ref={themeMenuRef} className="relative">
-            <button
-              onClick={() => setThemeMenuOpen(o => !o)}
-              title={`Theme: ${THEME_LABEL_FULL[mode]}`}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors text-[11px]"
-            >
-              {themeOption.icon}
-              <span className="hidden sm:inline">Theme</span>
-              <ChevronDown className="w-3 h-3" />
-            </button>
-            {themeMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 z-50 w-52 bg-t-card border border-t-line rounded-md shadow-lg overflow-hidden">
-                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-t-ink5 font-semibold border-b border-t-line">
-                  Color theme
-                </div>
-                <div className="py-1">
-                  {THEME_OPTIONS.map(opt => (
-                    <button key={opt.id}
-                      onClick={() => { setMode(opt.id); setThemeMenuOpen(false); }}
-                      className={`w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-t-hover transition-colors ${
-                        opt.id === mode ? "bg-blue-500/5" : ""
-                      }`}>
-                      {opt.id === mode
-                        ? <Check className="w-3 h-3 text-blue-500 shrink-0" />
-                        : <span className="w-3 shrink-0" />}
-                      <span className="shrink-0 text-t-ink4">{opt.icon}</span>
-                      <span className="text-[12px] text-t-ink2">{opt.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+          <Dropdown
+            align="right"
+            width="w-52"
+            trigger={({ open, toggle }) => (
+              <button
+                type="button"
+                onClick={toggle}
+                aria-expanded={open}
+                aria-label={`Theme: ${THEME_LABEL_FULL[mode]}`}
+                title={`Theme: ${THEME_LABEL_FULL[mode]}`}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors text-[12px]"
+              >
+                {themeOption.icon}
+                <span className="hidden sm:inline">Theme</span>
+                <ChevronDown className="w-3 h-3" />
+              </button>
             )}
-          </div>
+          >
+            <DropdownSection title="Color theme">
+              {THEME_OPTIONS.map(opt => (
+                <DropdownItem
+                  key={opt.id}
+                  active={opt.id === mode}
+                  onClick={() => setMode(opt.id)}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <span className="shrink-0 text-t-ink4">{opt.icon}</span>
+                    {opt.label}
+                  </span>
+                </DropdownItem>
+              ))}
+            </DropdownSection>
+          </Dropdown>
         </div>
       </header>
 
@@ -477,6 +555,245 @@ export default function App() {
               />
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ─── COMMAND PALETTE ─── */}
+      {paletteOpen && (
+        <CommandPalette
+          actions={buildPaletteActions({
+            view,
+            connected,
+            profiles,
+            activeProfile,
+            applyProfile,
+            changeView,
+            setMode,
+            mode,
+            triggerSend: () => setSendTrigger(n => n + 1),
+            disconnect: async () => {
+              try { await invoke("disconnect"); setConnected(false); addLog("info", "Disconnected"); }
+              catch (e) { addLog("err", String(e)); }
+            },
+            clearLogs: () => setLogs([]),
+            showUpdateModal: () => setShowUpdateModal(true),
+            hasUpdate: !!updateInfo,
+            showHelp: () => setShowHelp(true),
+          })}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+
+      {/* ─── UPDATE AVAILABLE MODAL ─── */}
+      {showUpdateModal && updateInfo && (
+        <UpdateModal
+          info={updateInfo}
+          onClose={() => setShowUpdateModal(false)}
+          onDismiss={() => {
+            dismissUpdate(updateInfo.latest);
+            setUpdateInfo(null);
+            setShowUpdateModal(false);
+          }}
+          onOpen={async () => {
+            try { await openUrl(updateInfo.url); } catch { /* fall back: copy URL? */ }
+          }}
+        />
+      )}
+
+      {/* ─── HELP MODAL ─── */}
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+    </div>
+  );
+}
+
+// ─── Command palette action builder ────────────────────────────────────────
+
+/**
+ * Build the list of actions exposed in the Cmd+K palette. Pulls everything
+ * from a single options bag so the closures all share the up-to-date App
+ * state — actions are rebuilt on each render (cheap), so each invocation
+ * sees the freshest `view` / `connected` / `profiles` etc.
+ */
+function buildPaletteActions(opts: {
+  view: View;
+  connected: boolean;
+  profiles: Profile[];
+  activeProfile: string;
+  applyProfile: (p: Profile) => void;
+  changeView: (v: View) => void;
+  setMode: (m: "light" | "dark" | "system") => void;
+  mode: string;
+  triggerSend: () => void;
+  disconnect: () => Promise<void>;
+  clearLogs: () => void;
+  showUpdateModal: () => void;
+  hasUpdate: boolean;
+  showHelp: () => void;
+}): PaletteAction[] {
+  const out: PaletteAction[] = [];
+
+  // ── Navigation ──
+  const VIEWS: { id: View; label: string; kbd: string; icon: React.ReactNode }[] = [
+    { id: "connection", label: "Go to Connection", kbd: "⌘1", icon: <Plug      className="w-3.5 h-3.5" /> },
+    { id: "publisher",  label: "Go to Send",       kbd: "⌘2", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "subscriber", label: "Go to Receive",    kbd: "⌘3", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "browser",    label: "Go to Browser",    kbd: "⌘4", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "history",    label: "Go to History",    kbd: "⌘5", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "stats",      label: "Go to Stats",      kbd: "⌘6", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "console",    label: "Go to Logs",       kbd: "⌘7", icon: <Terminal  className="w-3.5 h-3.5" /> },
+  ];
+  for (const v of VIEWS) {
+    out.push({
+      id:      `view:${v.id}`,
+      label:   v.label,
+      hint:    opts.view === v.id ? "Currently active" : undefined,
+      category: "Navigation",
+      icon:    v.icon,
+      kbd:     v.kbd,
+      disabled: opts.view === v.id,
+      run:     () => opts.changeView(v.id),
+    });
+  }
+
+  // ── Actions ──
+  if (opts.view === "publisher") {
+    out.push({
+      id:      "send:trigger",
+      label:   "Send message now",
+      hint:    "Same as Cmd+Enter inside the Send view",
+      category: "Actions",
+      icon:    <Sparkles className="w-3.5 h-3.5" />,
+      kbd:     "⌘↵",
+      disabled: !opts.connected,
+      run:     opts.triggerSend,
+    });
+  }
+  if (opts.connected) {
+    out.push({
+      id:      "conn:disconnect",
+      label:   "Disconnect from broker",
+      category: "Actions",
+      icon:    <Plug className="w-3.5 h-3.5" />,
+      run:     () => { void opts.disconnect(); },
+    });
+  } else {
+    out.push({
+      id:      "conn:connect",
+      label:   "Open Connection view to connect",
+      category: "Actions",
+      icon:    <Plug className="w-3.5 h-3.5" />,
+      run:     () => opts.changeView("connection"),
+    });
+  }
+  out.push({
+    id:      "logs:clear",
+    label:   "Clear all logs",
+    category: "Actions",
+    icon:    <Terminal className="w-3.5 h-3.5" />,
+    run:     opts.clearLogs,
+  });
+  out.push({
+    id:      "help:open",
+    label:   "Open Help",
+    hint:    "In-app guide for every feature",
+    category: "Actions",
+    icon:    <HelpCircle className="w-3.5 h-3.5" />,
+    kbd:     "?",
+    run:     opts.showHelp,
+  });
+  if (opts.hasUpdate) {
+    out.push({
+      id:      "update:show",
+      label:   "Show update notes",
+      hint:    "A new version is available on GitHub",
+      category: "Actions",
+      icon:    <Sparkles className="w-3.5 h-3.5" />,
+      run:     opts.showUpdateModal,
+    });
+  }
+
+  // ── Theme ──
+  for (const t of THEME_OPTIONS) {
+    out.push({
+      id:      `theme:${t.id}`,
+      label:   `Theme: ${t.label}`,
+      hint:    opts.mode === t.id ? "Currently active" : undefined,
+      category: "Theme",
+      icon:    t.icon,
+      disabled: opts.mode === t.id,
+      run:     () => opts.setMode(t.id),
+    });
+  }
+
+  // ── Profiles ──
+  for (const p of opts.profiles) {
+    out.push({
+      id:      `profile:${p.name}`,
+      label:   `Switch to profile: ${p.name}`,
+      hint:    `${p.host}:${p.port}${p.use_tls ? " · TLS" : ""}`,
+      category: "Profiles",
+      icon:    <User className="w-3.5 h-3.5" />,
+      disabled: p.name === opts.activeProfile,
+      run:     () => opts.applyProfile(p),
+    });
+  }
+
+  return out;
+}
+
+// ─── Update available modal ─────────────────────────────────────────────────
+
+function UpdateModal({ info, onClose, onDismiss, onOpen }: {
+  info: UpdateInfo;
+  onClose: () => void;
+  onDismiss: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[640px] max-w-[90vw] max-h-[85vh] flex flex-col overflow-hidden">
+
+        <div className="shrink-0 px-4 py-2.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+          <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+          <span className="text-[13px] font-semibold text-t-ink">A new version is available</span>
+          <span className="text-[11px] font-mono text-t-ink5">
+            v{info.current} → v{info.latest}
+          </span>
+          <button onClick={onClose} aria-label="Close" className="ml-auto p-1 rounded hover:bg-t-hover text-t-ink4 hover:text-t-ink text-lg leading-none">
+            ×
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {info.body
+            ? <pre className="text-[12px] text-t-ink2 whitespace-pre-wrap font-sans leading-relaxed">{info.body}</pre>
+            : <p className="text-[12px] text-t-ink5 italic">No release notes provided.</p>
+          }
+        </div>
+
+        <div className="shrink-0 px-3 py-2 border-t border-t-line bg-t-panel flex items-center gap-2">
+          <button
+            onClick={onDismiss}
+            className="px-3 py-1 rounded-md text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors"
+            title="Don't show this notification again for this version"
+          >
+            Skip this version
+          </button>
+          <span className="ml-auto" />
+          <button
+            onClick={onClose}
+            className="px-3 py-1 rounded-md text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors"
+          >
+            Later
+          </button>
+          <button
+            onClick={onOpen}
+            className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold transition-colors"
+          >
+            <DownloadIcon className="w-3 h-3" />
+            Open release on GitHub
+          </button>
         </div>
       </div>
     </div>

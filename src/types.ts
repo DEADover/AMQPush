@@ -82,7 +82,13 @@ export interface SubEvent {
 
 export interface LogEntry {
   id: number;
-  ts: string;
+  /** Unix epoch milliseconds — primary timestamp used for sorting and date
+   *  filtering. Display strings are derived from this on render. */
+  tsMs: number;
+  /** Legacy time-only string ("HH:MM:SS"). Kept on entries restored from
+   *  pre-tsMs localStorage so we can show *something* for old logs without
+   *  losing them. New entries don't set this. */
+  ts?: string;
   kind: "info" | "ok" | "err";
   text: string;
 }
@@ -106,6 +112,48 @@ export interface Template {
   address: string;
   body: string;
   properties: Record<string, string>;
+
+  // ── Optional fields (added in v1.2). Older saved templates won't have
+  //    them; loaders fall back to sensible defaults. ──
+
+  /** Saved Raw subtype. When `null/undefined`, auto-detect picks from body. */
+  raw_type?: "text" | "json" | "xml" | null;
+
+  /** Whether the Batch toggle was on when the template was saved. */
+  batch_enabled?: boolean | null;
+  repeat?: number | null;
+  delay_ms?: number | null;
+
+  /** Whether the Schedule toggle was on when the template was saved. */
+  schedule_enabled?: boolean | null;
+  /** Seconds to wait before the first send. */
+  schedule_delay_secs?: number | null;
+
+  /** Whether the Reply (request-reply) toggle was on when saved. */
+  reply_enabled?: boolean | null;
+  reply_to?: string | null;
+  reply_timeout_ms?: number | null;
+
+  /** User-defined variables from the Variables tab. Persists with template. */
+  user_vars?: Array<{
+    enabled: boolean;
+    key: string;
+    value: string;
+    description?: string;
+  }>;
+
+  /** JavaScript pre-script source — runs before each send to set variables. */
+  pre_script?: string | null;
+
+  /** JSON Schema source — when set + body subtype is JSON, body is validated.
+   *  @deprecated Kept for backward compat with templates saved before XSD
+   *  support landed. New saves use `body_schema_json` instead. */
+  body_schema?: string | null;
+
+  /** JSON Schema source for the JSON Raw subtype. */
+  body_schema_json?: string | null;
+  /** XSD (XML Schema) source for the XML Raw subtype. */
+  body_schema_xsd?: string | null;
 }
 
 export type View = "publisher" | "subscriber" | "history" | "connection" | "stats" | "console" | "browser";

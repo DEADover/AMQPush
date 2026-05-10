@@ -1,15 +1,25 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, ChangeEvent, ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Send, Plus, X, FileUp, Type, Repeat2,
   Wand2, BookMarked, Save, Trash2, Braces, CornerDownLeft, Loader2, Tag,
-  CheckCircle, XCircle, Clock,
+  CheckCircle, XCircle, Clock, ChevronDown, Pencil, CornerUpLeft, Code2,
+  ShieldCheck, AlertTriangle,
 } from "lucide-react";
 import { PropertyRow, SendResult, Template } from "../../types";
 import QueuePicker from "../QueuePicker";
-import { applyVariables, VARIABLE_HINTS, UserVariable } from "../../utils/variables";
-import CodeEditor from "../CodeEditor";
+import { applyVariables, runPreScript, VARIABLE_HINTS, UserVariable } from "../../utils/variables";
+import Ajv, { ErrorObject } from "ajv";
+import CodeEditor, { VariableSuggestion } from "../CodeEditor";
 import Tabs, { TabItem } from "../Tabs";
+import ViewTopBar from "../ViewTopBar";
+import EmptyState from "../EmptyState";
+import SectionLabel from "../SectionLabel";
+import Toggle from "../Toggle";
+import SegmentedControl from "../SegmentedControl";
+import Callout from "../Callout";
+import Dropdown, { DropdownItem } from "../Dropdown";
+import CopyButton from "../CopyButton";
 
 interface Props {
   connected: boolean;
@@ -36,7 +46,12 @@ const INPUT = "bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[1
 type BodyMode = "none" | "raw" | "binary";
 type RawType  = "text" | "json" | "xml";
 type ContentHint = "text" | "json" | "xml";
-type TabKey = "body" | "properties" | "variables" | "batch" | "reply" | "templates";
+type TabKey = "body" | "properties" | "variables" | "prescript" | "batch" | "reply" | "templates";
+
+/** Single Ajv instance reused across renders — keeps the underlying compile
+ *  cache warm so re-validating after a tiny edit doesn't re-compile from
+ *  scratch. */
+const ajv = new Ajv({ allErrors: true, strict: false });
 
 const RAW_TYPE_LABEL: Record<RawType, string> = { text: "Text", json: "JSON", xml: "XML" };
 const RAW_TYPE_CT:    Record<RawType, string | null> = {
@@ -66,8 +81,61 @@ function detectHint(s: string): ContentHint {
   return "text";
 }
 
+/** Sleep for `ms`, but reject with an AbortError if `signal` aborts during
+ *  the wait. Used by the Schedule feature so the user can cancel a pending
+ *  send instead of being forced to wait it out. */
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    }, { once: true });
+  });
+}
+
 function isValidJson(s: string) { try { JSON.parse(s); return true; } catch { return false; } }
-function formatJson(s: string) { try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; } }
+
+/**
+ * Beautify JSON while preserving `{{token}}` placeholders. Standard
+ * `JSON.parse` chokes on tokens in non-string positions (e.g. `"n": {{x}}`),
+ * so we first substitute every token with a unique sentinel string, parse +
+ * format, then restore — quoted tokens get quotes back, bare tokens don't.
+ */
+function formatJson(s: string): string {
+  const tokens: { token: string; quoted: boolean }[] = [];
+
+  // Phase 1: tokens already wrapped in quotes — `"{{x}}"`. Replace the whole
+  // `"…"` with a quoted sentinel string so we don't end up with `""…""`.
+  let sentinelized = s.replace(/"(\{\{[^}]+\}\})"/g, (_, token) => {
+    tokens.push({ token, quoted: true });
+    return `"__TPL_${tokens.length - 1}__"`;
+  });
+
+  // Phase 2: bare tokens in non-string positions — wrap in quotes so the
+  // result is still parseable.
+  sentinelized = sentinelized.replace(/\{\{[^}]+\}\}/g, (match) => {
+    tokens.push({ token: match, quoted: false });
+    return `"__TPL_${tokens.length - 1}__"`;
+  });
+
+  try {
+    const obj = JSON.parse(sentinelized);
+    let formatted = JSON.stringify(obj, null, 2);
+    tokens.forEach((info, i) => {
+      const placeholder = `"__TPL_${i}__"`;
+      const replacement = info.quoted ? `"${info.token}"` : info.token;
+      formatted = formatted.replace(placeholder, replacement);
+    });
+    return formatted;
+  } catch {
+    return s;
+  }
+}
 
 function isValidXml(s: string) {
   try {
@@ -103,14 +171,38 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   const [tab,        setTab]        = useState<TabKey>("body");
   const [mode,       setMode]       = useState<BodyMode>("raw");
   const [rawType,    setRawType]    = useState<RawType>("json");
-  const [rawTypeOpen,setRawTypeOpen]= useState(false);
   const [text,       setText]       = useState("");
+  /** True when the user explicitly picked a Raw subtype from the dropdown.
+   *  Disables the auto-detect-from-content effect so we don't fight the user.
+   *  Reset whenever the editor becomes empty or new content is loaded
+   *  (template / resend), so auto-detect is a fresh start each time. */
+  const [userPickedRawType, setUserPickedRawType] = useState(false);
   const [file,       setFile]       = useState<File | null>(null);
   const [props,      setProps]      = useState<PropertyRow[]>([]);
   const [userVars,   setUserVars]   = useState<UserVariable[]>([]);
-  const [repeat,     setRepeat]     = useState("1");
-  const [delayMs,    setDelayMs]    = useState("0");
+  const [batchEnabled,    setBatchEnabled]    = useState(false);
+  const [repeat,          setRepeat]          = useState("1");
+  const [delayMs,         setDelayMs]         = useState("0");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  /** Seconds to wait before the first message is actually sent. */
+  const [scheduleDelay,   setScheduleDelay]   = useState("30");
+  /** While > 0, the schedule countdown is being shown to the user. */
+  const [scheduleRemaining, setScheduleRemaining] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const [sending,    setSending]    = useState(false);
+  /** JavaScript source that runs before each send. Set vars via `ctx.set(name, value)`. */
+  const [preScript,  setPreScript]  = useState("");
+  /** Per-language schema sources. The active schema for the current Raw
+   *  subtype is what drives validation and the indicator pill in the Body
+   *  toolbar. Two fields so users don't lose their JSON Schema when switching
+   *  to XML and back. */
+  const [bodySchemaJson, setBodySchemaJson] = useState("");
+  const [bodySchemaXsd,  setBodySchemaXsd]  = useState("");
+  const [schemaModalOpen, setSchemaModalOpen] = useState(false);
+  /** Async XML validation result — null when not applicable; ok/errors/error
+   *  when xmllint has produced a verdict. */
+  const [xsdResult, setXsdResult] = useState<{ ok: boolean; errors: { message: string; line?: number }[]; schemaError?: string } | null>(null);
+  const [xsdValidating, setXsdValidating] = useState(false);
 
   // Send progress / status
   const [progress,   setProgress]   = useState<{ current: number; total: number } | null>(null);
@@ -135,14 +227,60 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   const [templates,  setTemplates]  = useState<Template[]>([]);
   const [savingTpl,  setSavingTpl]  = useState(false);
   const [newTplName, setNewTplName] = useState("");
+  /** Name of the template currently being inline-renamed; null when none. */
+  const [renamingTpl, setRenamingTpl] = useState<string | null>(null);
+  const [renamingDraft, setRenamingDraft] = useState("");
 
   const fileRef = useRef<HTMLInputElement>(null);
+  /** True while a file is being dragged over the binary dropzone — drives the
+   *  highlight ring + bg tint so users get immediate "yes, drop here" feedback. */
+  const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => { loadTemplates(); }, []);
 
   async function loadTemplates() {
     try { setTemplates(await invoke<Template[]>("get_templates")); } catch { /* ignore */ }
   }
+
+  // ─── Auto-detect Raw subtype from body content ─────────────────────────────
+  // When the user pastes / types content starting with `{`/`[` we switch to
+  // JSON; with `<` to XML. Skipped when the user has explicitly picked a
+  // subtype from the dropdown (so manual choices stick). Clearing a
+  // previously non-empty editor resets the override, so the next paste is
+  // auto-detected fresh — but picking a type in an already-empty editor
+  // keeps the choice (so users can pre-set the language before typing).
+  const prevTextRef = useRef("");
+  useEffect(() => {
+    const wasNonEmpty = !!prevTextRef.current.trim();
+    const isEmpty = !text.trim();
+    prevTextRef.current = text;
+
+    if (mode !== "raw") return;
+
+    // Editor went non-empty → empty: release the manual override so the next
+    // paste can auto-detect. Don't change rawType — the user keeps seeing
+    // their last pick until content arrives.
+    if (wasNonEmpty && isEmpty && userPickedRawType) {
+      setUserPickedRawType(false);
+      return;
+    }
+
+    // Manual pick is sticky — never auto-overridden while it's set.
+    if (userPickedRawType) return;
+
+    // No content yet and no manual pick → leave rawType alone (don't force
+    // it back to "text" just because the buffer is empty).
+    if (isEmpty) return;
+
+    const detected = detectHint(text);
+    setRawType(prev => prev === detected ? prev : detected);
+  }, [text, mode, userPickedRawType]);
+
+  /** Wraps `setRawType` for explicit dropdown picks — sticks until editor empties. */
+  const userSetRawType = useCallback((t: RawType) => {
+    setRawType(t);
+    setUserPickedRawType(true);
+  }, []);
 
   // Resend payload from history
   useEffect(() => {
@@ -166,6 +304,8 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
       setText(resendPayload.body);
       setMode("raw");
       setFile(null);
+      // Let the auto-detect effect pick JSON/XML/text from the resent body.
+      setUserPickedRawType(false);
     }
 
     // Restore custom properties (excluding internal markers)
@@ -226,9 +366,89 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   }
 
   // Content type validation — based on explicit rawType
-  const jsonValid = rawType !== "json" || !text.trim() || isValidJson(text);
-  const xmlValid  = rawType !== "xml"  || !text.trim() || isValidXml(text);
-  const textOk    = jsonValid && xmlValid;
+  // Validate the template against the active subtype WITHOUT depending on
+  // actual variable values — replace each `{{…}}` token with a neutral
+  // placeholder that is structurally valid in any position. For JSON we use
+  // `0` (a primitive that's valid as a value, array element, etc.); for XML
+  // we use `_X_` (a valid name / text / attribute-value sequence). This
+  // way `{"count": {{n}}}` reports as valid even though `{{n}}` is unquoted.
+  const textForValidation =
+    rawType === "json" ? text.replace(/\{\{[^}]+\}\}/g, "0") :
+    rawType === "xml"  ? text.replace(/\{\{[^}]+\}\}/g, "_X_") :
+                         text;
+  const jsonValid = rawType !== "json" || !textForValidation.trim() || isValidJson(textForValidation);
+  const xmlValid  = rawType !== "xml"  || !textForValidation.trim() || isValidXml(textForValidation);
+
+  // ── JSON Schema validation (sync, ajv) ──────────────────────────────────
+  // Active only when Raw + JSON subtype + body parses + schema set.
+  const jsonSchemaResult = useMemo<{ ok: boolean; errors: ErrorObject[]; schemaError?: string } | null>(() => {
+    if (rawType !== "json" || !bodySchemaJson.trim() || !text.trim() || !jsonValid) return null;
+    let parsedSchema: object;
+    try {
+      parsedSchema = JSON.parse(bodySchemaJson);
+    } catch (e) {
+      return { ok: false, errors: [], schemaError: `Invalid schema JSON: ${(e as Error).message}` };
+    }
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(textForValidation);
+    } catch {
+      return null;
+    }
+    try {
+      const validate = ajv.compile(parsedSchema);
+      const ok = validate(parsedBody);
+      return { ok, errors: ok ? [] : (validate.errors ?? []) };
+    } catch (e) {
+      return { ok: false, errors: [], schemaError: `Schema compile failed: ${(e as Error).message}` };
+    }
+  }, [rawType, bodySchemaJson, text, textForValidation, jsonValid]);
+
+  // ── XSD validation (async via lazy-loaded xmllint-wasm) ─────────────────
+  // We debounce + dynamic-import so the WASM blob (~500KB) is only fetched
+  // when the user actually has an XSD to validate against.
+  useEffect(() => {
+    if (rawType !== "xml" || !bodySchemaXsd.trim() || !text.trim() || !xmlValid) {
+      setXsdResult(null);
+      setXsdValidating(false);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(async () => {
+      setXsdValidating(true);
+      try {
+        const { validateXML } = await import("xmllint-wasm");
+        const result = await validateXML({
+          xml: textForValidation,
+          schema: bodySchemaXsd,
+        });
+        if (cancelled) return;
+        setXsdResult({
+          ok: result.valid,
+          errors: result.errors.map(e => ({ message: e.message, line: e.loc?.lineNumber })),
+        });
+      } catch (e) {
+        if (cancelled) return;
+        setXsdResult({ ok: false, errors: [], schemaError: (e as Error).message });
+      } finally {
+        if (!cancelled) setXsdValidating(false);
+      }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [rawType, bodySchemaXsd, text, textForValidation, xmlValid]);
+
+  // Active result for the current language — used to drive the Body toolbar
+  // pill and the modal footer.
+  const activeSchemaResult: null | { ok: boolean; errors: { message: string; instancePath?: string; line?: number }[]; schemaError?: string } =
+    rawType === "json" && jsonSchemaResult
+      ? { ok: jsonSchemaResult.ok, errors: jsonSchemaResult.errors.map(e => ({ message: e.message ?? "(no message)", instancePath: e.instancePath })), schemaError: jsonSchemaResult.schemaError }
+      : rawType === "xml" && xsdResult
+        ? xsdResult
+        : null;
+
+  const activeSchema = rawType === "json" ? bodySchemaJson : rawType === "xml" ? bodySchemaXsd : "";
+
+  const textOk = jsonValid && xmlValid && (activeSchemaResult ? activeSchemaResult.ok : true);
 
   function handleFormat() {
     if (rawType === "json") setText(formatJson(text));
@@ -243,6 +463,26 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
       address: address.trim(),
       body: text,
       properties: collectProps(),
+      raw_type: rawType,
+      batch_enabled: batchEnabled,
+      repeat: Number(repeat) || 1,
+      delay_ms: Number(delayMs) || 0,
+      schedule_enabled: scheduleEnabled,
+      schedule_delay_secs: Number(scheduleDelay) || 0,
+      reply_enabled: rrEnabled,
+      reply_to: rrAddress,
+      reply_timeout_ms: Number(rrTimeout) || 5000,
+      // Persist Variables tab + Pre-script so the template fully captures the
+      // current Send setup. Strip our internal `id` (renumbered on load).
+      user_vars: userVars.map(v => ({
+        enabled: v.enabled,
+        key: v.key,
+        value: v.value,
+        description: v.description,
+      })),
+      pre_script: preScript,
+      body_schema_json: bodySchemaJson,
+      body_schema_xsd:  bodySchemaXsd,
     };
     try {
       await invoke("save_template", { template: tpl });
@@ -261,15 +501,63 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     } catch (e) { onLog("err", String(e)); }
   }
 
+  async function renameTemplate(oldName: string, newName: string) {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    try {
+      await invoke("rename_template", { oldName, newName: trimmed });
+      await loadTemplates();
+      onLog("ok", `Template "${oldName}" renamed to "${trimmed}"`);
+    } catch (e) { onLog("err", `Rename failed: ${e}`); }
+  }
+
   function loadTemplate(tpl: Template) {
     setAddress(tpl.address);
     setText(tpl.body);
     setMode("raw");
-    // Auto-detect type from body
-    const detected = detectHint(tpl.body);
-    setRawType(detected);
+    // Restore Raw subtype: explicit save wins, otherwise let auto-detect pick.
+    if (tpl.raw_type) {
+      setRawType(tpl.raw_type as RawType);
+      setUserPickedRawType(true);
+    } else {
+      setUserPickedRawType(false);
+    }
     const rows = Object.entries(tpl.properties).map(([k, v]) => ({ id: ++rowId, enabled: true, key: k, value: v, description: "" }));
     setProps(rows);
+    // Restore Batch / Reply state — for old templates without these fields
+    // we fall back to defaults (off / off) rather than leaving them as the
+    // current form values.
+    setBatchEnabled(tpl.batch_enabled ?? false);
+    if (tpl.repeat   !== undefined && tpl.repeat   !== null) setRepeat(String(tpl.repeat));
+    if (tpl.delay_ms !== undefined && tpl.delay_ms !== null) setDelayMs(String(tpl.delay_ms));
+    setScheduleEnabled(tpl.schedule_enabled ?? false);
+    if (tpl.schedule_delay_secs !== undefined && tpl.schedule_delay_secs !== null)
+      setScheduleDelay(String(tpl.schedule_delay_secs));
+    setRrEnabled(tpl.reply_enabled ?? false);
+    if (tpl.reply_to         !== undefined && tpl.reply_to         !== null) setRrAddress(tpl.reply_to);
+    if (tpl.reply_timeout_ms !== undefined && tpl.reply_timeout_ms !== null) setRrTimeout(String(tpl.reply_timeout_ms));
+    // Variables tab — restore the full list (renumbering ids so they don't
+    // collide with anything currently allocated in the form).
+    if (tpl.user_vars && tpl.user_vars.length > 0) {
+      setUserVars(tpl.user_vars.map(v => ({
+        id: ++rowId,
+        enabled: v.enabled,
+        key: v.key,
+        value: v.value,
+        description: v.description ?? "",
+      })));
+    } else {
+      // Older templates (or template explicitly saved without vars) → clear,
+      // so previously-loaded vars from a different template don't bleed in.
+      setUserVars([]);
+    }
+    setPreScript(tpl.pre_script ?? "");
+    // Restore per-language schemas. Legacy templates only had `body_schema` —
+    // assume it was the JSON Schema since that was the only kind we supported,
+    // and migrate accordingly. Templates saved with the new fields take
+    // precedence.
+    setBodySchemaJson(tpl.body_schema_json ?? tpl.body_schema ?? "");
+    setBodySchemaXsd(tpl.body_schema_xsd ?? "");
     onLog("info", `Template "${tpl.name}" loaded`);
     setTab("body");
   }
@@ -280,8 +568,11 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     if (mode === "raw" && !text.trim()) { onLog("err", "Message body is empty"); return; }
     if (mode === "raw" && !textOk)      { onLog("err", rawType === "json" ? "Invalid JSON" : "Invalid XML"); return; }
     if (mode === "binary" && !file)     { onLog("err", "No file selected"); return; }
-    const n = Math.max(1, Number(repeat) || 1);
-    const delay = Math.max(0, Number(delayMs) || 0);
+    // Batch parameters only apply when the toggle on the Batch tab is on.
+    // Otherwise we send exactly once with no delay, regardless of leftover
+    // values in the inputs.
+    const n     = batchEnabled ? Math.max(1, Number(repeat)  || 1) : 1;
+    const delay = batchEnabled ? Math.max(0, Number(delayMs) || 0) : 0;
     const customProps = collectProps();
     // Auto content-type from rawType
     if (mode === "raw" && RAW_TYPE_CT[rawType] && !customProps["content-type"]) {
@@ -294,13 +585,62 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     setLastSend(null);
     setRrReply(null);
     setRrTimedOut(false);
+
+    // ── Schedule (delayed start) ────────────────────────────────────────
+    // Wrap the send in an AbortController so the user can cancel the
+    // pending wait. Without abort there'd be no way to back out short of
+    // killing the app — clearly user-hostile for a 30-minute schedule.
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     try {
+      if (scheduleEnabled) {
+        const totalSecs = Math.max(0, Number(scheduleDelay) || 0);
+        if (totalSecs > 0) {
+          onLog("info", `Send scheduled in ${totalSecs}s`);
+          // Tick the countdown each second so the status bar can show
+          // remaining time. The actual wait uses one big abortable timeout
+          // — the ticker is purely cosmetic.
+          setScheduleRemaining(totalSecs);
+          let remaining = totalSecs;
+          const interval = setInterval(() => {
+            remaining = Math.max(0, remaining - 1);
+            setScheduleRemaining(remaining);
+            if (remaining <= 0) clearInterval(interval);
+          }, 1000);
+          try {
+            await abortableDelay(totalSecs * 1000, ctrl.signal);
+          } finally {
+            clearInterval(interval);
+            setScheduleRemaining(null);
+          }
+        }
+      }
+
       let totalBytes = 0;
       for (let i = 0; i < n; i++) {
-        if (i > 0 && delay > 0) await new Promise(r => setTimeout(r, delay));
+        if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (i > 0 && delay > 0) await abortableDelay(delay, ctrl.signal);
         setProgress({ current: i + 1, total: n });
+        // Run the Pre-script (if any) before each iteration so dynamic
+        // values like timestamps / counters update per-message. Variables
+        // it sets layer on top of user-defined Variables tab entries
+        // (script wins on key collision).
+        let scriptVars: UserVariable[] = userVars;
+        if (preScript.trim()) {
+          const r = runPreScript(preScript, userVars);
+          for (const line of r.logs) onLog("info", `pre-script: ${line}`);
+          if (r.error) {
+            onLog("err", `Pre-script error: ${r.error}`);
+            throw new Error(`Pre-script error: ${r.error}`);
+          }
+          // Build a merged var list: script-set keys take precedence.
+          const overrides = Object.entries(r.vars).map(([key, value]) => ({
+            id: -1, enabled: true, key, value, description: "(pre-script)",
+          }));
+          scriptVars = [...overrides, ...userVars];
+        }
         const resolvedText =
-          mode === "raw"  ? applyVariables(text.trim(), userVars) :
+          mode === "raw"  ? applyVariables(text.trim(), scriptVars) :
           mode === "none" ? "" :
           null;
         const result = await invoke<SendResult>("send_message", mode === "binary" && file
@@ -342,36 +682,81 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         return;
       }
     } catch (e) {
+      // The user cancelled a scheduled / batched send — treat as a clean
+      // exit, don't bump the error counter.
+      if (e instanceof DOMException && e.name === "AbortError") {
+        onLog("info", "Send cancelled");
+        setProgress(null);
+        setScheduleRemaining(null);
+        return;
+      }
       const msg = String(e);
       onLog("err", `Send failed: ${msg}`);
       setLastSend({ ok: false, error: msg, ts: new Date().toLocaleTimeString() });
       setProgress(null);
       onSendError?.();
     }
-    finally { setSending(false); }
+    finally {
+      setSending(false);
+      abortRef.current = null;
+    }
+  }
+
+  /** Abort any in-flight scheduled / batch send. Wired to the Cancel button
+   *  that shows up in the status bar while a wait is active. */
+  function cancelSend() {
+    abortRef.current?.abort();
   }
 
   const hasVars = mode === "raw" && /\{\{.+?\}\}/.test(text);
-  const batchActive = Number(repeat) > 1 || Number(delayMs) > 0;
+  const batchActive = batchEnabled;
 
+  const preScriptActive = preScript.trim().length > 0;
   const tabs: TabItem[] = [
     { id: "body",       label: "Body",       icon: <Type className="w-3.5 h-3.5" /> },
     { id: "properties", label: "Properties", icon: <Tag className="w-3.5 h-3.5" />, badge: enabledPropsCount },
     { id: "variables",  label: "Variables",  icon: <Braces className="w-3.5 h-3.5" />, badge: enabledUserVarsCount, dot: hasVars && enabledUserVarsCount === 0 },
+    { id: "prescript",  label: "Pre-script", icon: <Code2 className="w-3.5 h-3.5" />, dot: preScriptActive },
     { id: "batch",      label: "Batch",      icon: <Repeat2 className="w-3.5 h-3.5" />, dot: batchActive },
     { id: "reply",      label: "Reply",      icon: <CornerDownLeft className="w-3.5 h-3.5" />, dot: rrEnabled },
     { id: "templates",  label: "Templates",  icon: <BookMarked className="w-3.5 h-3.5" />, badge: templates.length },
   ];
+
+  // Combined autocomplete list for the Body editor: user-defined variables
+  // (Variables tab) layered on top of the built-in token catalogue. Built-ins
+  // always work in the Body whether the user has "registered" them or not, so
+  // they're surfaced in the dropdown unconditionally — that way `{{uuid}}`,
+  // `{{timestamp}}` etc. are discoverable without leaving the editor.
+  const variableSuggestions: VariableSuggestion[] = (() => {
+    const out: VariableSuggestion[] = [];
+    // User vars first so they appear at the top of the popup.
+    for (const v of userVars) {
+      if (!v.enabled || !v.key.trim()) continue;
+      out.push({
+        name: v.key.trim(),
+        description: v.description || `User variable — current value: ${v.value || "(empty)"}`,
+        group: "user variable",
+      });
+    }
+    for (const h of VARIABLE_HINTS) {
+      const bare = h.token.replace(/^\{\{|\}\}$/g, "");
+      // Skip if a user var has the same key — user var shadows the built-in.
+      if (out.some(s => s.name === bare)) continue;
+      out.push({ name: bare, description: h.description, group: "built-in" });
+    }
+    return out;
+  })();
 
   const sendDisabled = !connected || sending || (mode === "raw" && !!text && !textOk);
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden min-h-0">
 
-      {/* ─── TOP BAR: address + Send button (Postman style) ─── */}
-      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <span className="text-[10px] font-bold text-t-ink4 uppercase tracking-widest shrink-0">Target</span>
-        <QueuePicker value={address} onChange={setAddress} connected={connected} showSave className="flex-1" />
+      {/* ─── TITLE ROW ─── */}
+      <ViewTopBar
+        icon={<Send className="w-3.5 h-3.5" />}
+        title="Send message"
+      >
         <button
           onClick={doSend}
           disabled={sendDisabled}
@@ -380,6 +765,12 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           <Send className="w-3.5 h-3.5" />
           {sending ? "Sending…" : "Send"}
         </button>
+      </ViewTopBar>
+
+      {/* ─── QUEUE PICKER ROW ─── */}
+      <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+        <SectionLabel className="shrink-0">To</SectionLabel>
+        <QueuePicker value={address} onChange={setAddress} connected={connected} showSave className="flex-1" />
       </div>
 
       {/* ─── TABS ─── */}
@@ -392,68 +783,108 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         {tab === "body" && (
           <div className="flex-1 min-h-0 flex flex-col">
 
-            {/* Body sub-toolbar — Postman-style: radio modes + raw subtype dropdown + actions */}
-            <div className="shrink-0 px-3 py-1.5 flex items-center gap-4 border-b border-t-line bg-t-panel">
+            {/* Body sub-toolbar — segmented mode picker + raw subtype dropdown + validation/format */}
+            <div className="shrink-0 px-3 py-1.5 flex items-center gap-3 border-b border-t-line bg-t-panel">
 
-              {/* Radio: none / raw / binary */}
-              {(["none", "raw", "binary"] as BodyMode[]).map(m => (
-                <label key={m} className="flex items-center gap-1.5 cursor-pointer text-[12px] group">
-                  <input
-                    type="radio"
-                    name="bodyMode"
-                    checked={mode === m}
-                    onChange={() => setMode(m)}
-                    className="w-3 h-3 accent-blue-600 cursor-pointer"
-                  />
-                  <span className={mode === m ? "text-t-ink" : "text-t-ink3 group-hover:text-t-ink2 transition-colors"}>
-                    {m}
-                  </span>
-                </label>
-              ))}
+              {/* Body mode: none / raw / binary */}
+              <SegmentedControl<BodyMode>
+                value={mode}
+                onChange={setMode}
+                casing="normal"
+                options={[
+                  { value: "none",   label: "None",   title: "Send an empty payload" },
+                  { value: "raw",    label: "Raw",    title: "Send a text payload" },
+                  { value: "binary", label: "Binary", title: "Send a file as the payload" },
+                ]}
+              />
 
               {/* Raw type dropdown — visible only when raw is selected */}
               {mode === "raw" && (
-                <div className="relative">
-                  <button
-                    onClick={() => setRawTypeOpen(o => !o)}
-                    onBlur={() => setTimeout(() => setRawTypeOpen(false), 150)}
-                    className="flex items-center gap-1 text-[12px] text-blue-500 hover:text-blue-400 font-medium transition-colors"
-                  >
-                    {RAW_TYPE_LABEL[rawType]}
-                    <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor"><path d="M3 4.5l3 3 3-3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round"/></svg>
-                  </button>
-                  {rawTypeOpen && (
-                    <div className="absolute left-0 top-full mt-1 z-50 w-32 bg-t-card border border-t-line rounded-md shadow-lg overflow-hidden">
-                      {(["text", "json", "xml"] as RawType[]).map(t => (
-                        <button key={t}
-                          onMouseDown={(e) => { e.preventDefault(); setRawType(t); setRawTypeOpen(false); }}
-                          className={`w-full text-left px-3 py-1.5 text-[12px] hover:bg-t-hover transition-colors ${
-                            rawType === t ? "text-blue-500 bg-blue-500/5 font-medium" : "text-t-ink2"
-                          }`}>
-                          {RAW_TYPE_LABEL[t]}
-                        </button>
-                      ))}
-                    </div>
+                <Dropdown
+                  width="w-32"
+                  trigger={({ open, toggle }) => (
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      aria-expanded={open}
+                      className="flex items-center gap-1 text-[12px] text-blue-500 hover:text-blue-400 font-medium transition-colors"
+                    >
+                      {RAW_TYPE_LABEL[rawType]}
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
                   )}
-                </div>
+                >
+                  {(["text", "json", "xml"] as RawType[]).map(t => (
+                    <DropdownItem
+                      key={t}
+                      active={rawType === t}
+                      onClick={() => userSetRawType(t)}
+                    >
+                      {RAW_TYPE_LABEL[t]}
+                    </DropdownItem>
+                  ))}
+                </Dropdown>
               )}
 
-              {/* Right side: validation + Beautify */}
+              {/* Right side: validation + vars + Beautify */}
               <div className="ml-auto flex items-center gap-3">
                 {mode === "raw" && rawType === "json" && text.trim() && (
-                  <span className={`text-[11px] font-medium ${jsonValid ? "text-green-500" : "text-red-500"}`}>
-                    {jsonValid ? "✓ valid" : "✗ invalid"}
+                  <span className={`flex items-center gap-1 text-[11px] font-medium ${jsonValid ? "text-green-500" : "text-red-500"}`}>
+                    {jsonValid
+                      ? <><CheckCircle className="w-3 h-3" /> valid</>
+                      : <><XCircle className="w-3 h-3" /> invalid</>}
                   </span>
                 )}
                 {mode === "raw" && rawType === "xml" && text.trim() && (
-                  <span className={`text-[11px] font-medium ${xmlValid ? "text-green-500" : "text-red-500"}`}>
-                    {xmlValid ? "✓ valid" : "✗ invalid"}
+                  <span className={`flex items-center gap-1 text-[11px] font-medium ${xmlValid ? "text-green-500" : "text-red-500"}`}>
+                    {xmlValid
+                      ? <><CheckCircle className="w-3 h-3" /> valid</>
+                      : <><XCircle className="w-3 h-3" /> invalid</>}
                   </span>
                 )}
                 {hasVars && (
                   <span className="flex items-center gap-1 text-[11px] text-blue-500 font-medium">
                     <Braces className="w-3 h-3" /> vars
                   </span>
+                )}
+                {/* Schema button — opens schema modal. Only shown for JSON / XML
+                    subtypes. Status pill (✓ / ✗) is rendered when a schema is
+                    configured AND the validator has produced a verdict. */}
+                {(rawType === "json" || rawType === "xml") && (
+                  <button
+                    type="button"
+                    onClick={() => setSchemaModalOpen(true)}
+                    className={`flex items-center gap-1 text-[11px] font-medium transition-colors ${
+                      activeSchemaResult
+                        ? activeSchemaResult.ok
+                          ? "text-green-500 hover:text-green-400"
+                          : "text-red-500 hover:text-red-400"
+                        : activeSchema.trim()
+                          ? "text-blue-500 hover:text-blue-400"
+                          : "text-t-ink4 hover:text-blue-500"
+                    }`}
+                    title={
+                      xsdValidating
+                        ? "Validating XSD…"
+                        : activeSchemaResult
+                          ? activeSchemaResult.ok
+                            ? `Body matches the ${rawType === "json" ? "JSON Schema" : "XSD"}. Click to edit.`
+                            : `${activeSchemaResult.errors.length || 1} schema error${(activeSchemaResult.errors.length || 1) !== 1 ? "s" : ""} — click to see details.`
+                          : activeSchema.trim()
+                            ? `${rawType === "json" ? "JSON Schema" : "XSD"} configured — click to edit.`
+                            : `Click to define a ${rawType === "json" ? "JSON Schema" : "XSD"} for body validation.`
+                    }
+                  >
+                    {xsdValidating
+                      ? <><Loader2 className="w-3 h-3 animate-spin" /> schema…</>
+                      : activeSchemaResult
+                        ? activeSchemaResult.ok
+                          ? <><ShieldCheck className="w-3 h-3" /> schema ✓</>
+                          : <><ShieldCheck className="w-3 h-3" /> schema ✗{activeSchemaResult.errors.length > 0 && ` (${activeSchemaResult.errors.length})`}</>
+                        : activeSchema.trim()
+                          ? <><ShieldCheck className="w-3 h-3" /> schema</>
+                          : <><ShieldCheck className="w-3 h-3" /> Schema…</>}
+                  </button>
                 )}
                 {mode === "raw" && rawType !== "text" && (
                   <button onClick={handleFormat}
@@ -466,10 +897,12 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
 
             {/* None mode — empty body indicator */}
             {mode === "none" && (
-              <div className="flex-1 min-h-0 flex flex-col items-center justify-center text-t-ink5 p-8">
-                <Type className="w-8 h-8 mb-3 opacity-40" />
-                <p className="text-[13px]">This message has no body</p>
-                <p className="text-[11px] mt-1">An empty payload will be sent to the queue</p>
+              <div className="flex-1 min-h-0">
+                <EmptyState
+                  icon={<Type className="w-8 h-8" />}
+                  title="This message has no body"
+                  subtitle="An empty payload will be sent to the queue"
+                />
               </div>
             )}
 
@@ -483,16 +916,33 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                   placeholder={`Type your ${RAW_TYPE_LABEL[rawType]} message…`}
                   minHeight="120px"
                   className={`flex-1 ${text && !textOk ? "ring-1 ring-red-500/30" : ""}`}
+                  variables={variableSuggestions}
                 />
               </div>
             )}
 
-            {/* Binary file picker */}
+            {/* Binary file picker — click to browse OR drag from Finder/Explorer */}
             {mode === "binary" && (
               <div className="flex-1 min-h-0 p-3">
-                <div onClick={() => fileRef.current?.click()}
-                  className="h-full flex flex-col items-center justify-center gap-3 border-2 border-dashed border-t-line2 rounded-xl cursor-pointer hover:border-blue-500/50 hover:bg-t-hover transition-all">
-                  <FileUp className="w-8 h-8 text-t-ink5" />
+                <div
+                  onClick={() => fileRef.current?.click()}
+                  onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }}
+                  onDragOver={(e)  => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }}
+                  onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(false); }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDragOver(false);
+                    const dropped = e.dataTransfer?.files;
+                    if (dropped && dropped.length > 0) setFile(dropped[0]);
+                  }}
+                  className={`h-full flex flex-col items-center justify-center gap-3 border-2 border-dashed rounded-xl cursor-pointer transition-all ${
+                    dragOver
+                      ? "border-blue-500 bg-blue-500/5"
+                      : "border-t-line2 hover:border-blue-500/50 hover:bg-t-hover"
+                  }`}
+                >
+                  <FileUp className={`w-8 h-8 transition-colors ${dragOver ? "text-blue-500" : "text-t-ink5"}`} />
                   {file ? (
                     <div className="text-center">
                       <p className="text-[13px] text-t-ink font-medium">{file.name}</p>
@@ -501,7 +951,14 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                         className="mt-2 text-[11px] text-t-ink5 hover:text-red-500 transition-colors">Clear</button>
                     </div>
                   ) : (
-                    <p className="text-[13px] text-t-ink5">Click to choose a file</p>
+                    <div className="text-center">
+                      <p className={`text-[13px] transition-colors ${dragOver ? "text-blue-500 font-medium" : "text-t-ink5"}`}>
+                        {dragOver ? "Drop the file here" : "Click to choose a file"}
+                      </p>
+                      {!dragOver && (
+                        <p className="text-[11px] text-t-ink5 mt-1">or drag and drop here</p>
+                      )}
+                    </div>
                   )}
                 </div>
                 <input ref={fileRef} type="file" className="hidden" onChange={e => setFile(e.target.files?.[0] ?? null)} />
@@ -526,25 +983,30 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             {/* Table */}
             <div className="flex-1 min-h-0 overflow-y-auto">
               {/* Column headers */}
-              <div className="sticky top-0 z-10 grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel text-[10px] font-semibold uppercase tracking-wider text-t-ink4">
+              <div className="sticky top-0 z-10 grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel">
                 <div></div>
-                <div>Key</div>
-                <div>Value</div>
-                <div>Description</div>
+                <SectionLabel>Key</SectionLabel>
+                <SectionLabel>Value</SectionLabel>
+                <SectionLabel>Description</SectionLabel>
                 <div></div>
               </div>
 
               {/* Rows */}
               {props.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-t-ink5">
-                  <Tag className="w-8 h-8 mb-3 opacity-40" />
-                  <p className="text-[13px]">No properties added</p>
-                  <button onClick={addProp} className="text-[11px] text-blue-500 hover:text-blue-400 mt-2 transition-colors">+ Add your first property</button>
-                </div>
+                <EmptyState
+                  icon={<Tag className="w-8 h-8" />}
+                  title="No properties added"
+                  action={
+                    <button onClick={addProp}
+                      className="text-[11px] text-blue-500 hover:text-blue-400 transition-colors">
+                      + Add your first property
+                    </button>
+                  }
+                />
               ) : (
                 props.map(row => (
                   <div key={row.id}
-                    className="grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1 border-b border-t-line/60 hover:bg-t-hover/40 group">
+                    className="grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1 border-b border-t-line/40 hover:bg-t-hover/50 group">
                     <label className="flex items-center justify-center cursor-pointer">
                       <input type="checkbox" checked={row.enabled !== false}
                         onChange={e => updateProp(row.id, "enabled", e.target.checked)}
@@ -577,17 +1039,28 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             {/* Sub-toolbar: caption + Presets dropdown + Add */}
             <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
               <span className="text-[11px] text-t-ink4">
-                Use <code className="text-blue-500 font-mono">{`{{name}}`}</code> in body — replaced on each send.
+                Use <code className="text-blue-500 font-mono">{`{{key}}`}</code> in body — replaced on each send.
               </span>
 
-              {/* Presets dropdown */}
-              <div className="relative ml-auto group">
-                <button className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors flex items-center gap-1 border border-t-line">
-                  <Braces className="w-3 h-3" /> Built-in presets
-                </button>
-                <div className="absolute right-0 top-full mt-1 z-50 w-72 bg-t-card border border-t-line rounded-lg shadow-lg overflow-hidden hidden group-focus-within:block group-hover:block">
-                  <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-t-ink5 font-semibold border-b border-t-line">
-                    Click to add as user variable
+              {/* Presets dropdown — click-to-open via shared Dropdown */}
+              <div className="ml-auto">
+                <Dropdown
+                  align="right"
+                  width="w-72"
+                  trigger={({ open, toggle }) => (
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      aria-expanded={open}
+                      className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors flex items-center gap-1 border border-t-line"
+                    >
+                      <Braces className="w-3 h-3" /> Built-in presets
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
+                  )}
+                >
+                  <div className="px-3 py-1.5 border-b border-t-line">
+                    <SectionLabel>Click to add as user variable</SectionLabel>
                   </div>
                   <div className="max-h-64 overflow-y-auto py-1">
                     {VARIABLE_HINTS.map(v => (
@@ -598,7 +1071,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       </button>
                     ))}
                   </div>
-                </div>
+                </Dropdown>
               </div>
 
               <button onClick={addUserVar}
@@ -610,26 +1083,31 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             {/* Table-style variables list */}
             <div className="flex-1 min-h-0 overflow-y-auto">
               {/* Column headers */}
-              <div className="sticky top-0 z-10 grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel text-[10px] font-semibold uppercase tracking-wider text-t-ink4">
+              <div className="sticky top-0 z-10 grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel">
                 <div></div>
-                <div>Key</div>
-                <div>Value</div>
-                <div>Description</div>
+                <SectionLabel>Key</SectionLabel>
+                <SectionLabel>Value</SectionLabel>
+                <SectionLabel>Description</SectionLabel>
                 <div></div>
               </div>
 
               {/* Rows */}
               {userVars.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-t-ink5">
-                  <Braces className="w-8 h-8 mb-3 opacity-40" />
-                  <p className="text-[13px]">No variables defined</p>
-                  <button onClick={addUserVar} className="text-[11px] text-blue-500 hover:text-blue-400 mt-2 transition-colors">+ Add your first variable</button>
-                  <p className="text-[10px] text-t-ink5 mt-3">Or pick a built-in preset from the dropdown above</p>
-                </div>
+                <EmptyState
+                  icon={<Braces className="w-8 h-8" />}
+                  title="No variables defined"
+                  subtitle="Or pick a built-in preset from the dropdown above"
+                  action={
+                    <button onClick={addUserVar}
+                      className="text-[11px] text-blue-500 hover:text-blue-400 transition-colors">
+                      + Add your first variable
+                    </button>
+                  }
+                />
               ) : (
                 userVars.map(v => (
                   <div key={v.id}
-                    className="grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1 border-b border-t-line/60 hover:bg-t-hover/40 group">
+                    className="grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1 border-b border-t-line/40 hover:bg-t-hover/50 group">
                     {/* Enabled checkbox */}
                     <label className="flex items-center justify-center cursor-pointer">
                       <input type="checkbox" checked={v.enabled}
@@ -656,6 +1134,53 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           </div>
         )}
 
+        {/* PRE-SCRIPT TAB */}
+        {tab === "prescript" && (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
+              <span className="text-[11px] text-t-ink4">
+                JavaScript that runs before each send. Set variables via{" "}
+                <code className="text-blue-500 font-mono">ctx.set(name, value)</code>{" "}
+                — they become available as <code className="text-blue-500 font-mono">{`{{name}}`}</code>{" "}
+                in the body.
+              </span>
+            </div>
+
+            <div className="flex-1 min-h-0 flex flex-col">
+              <CodeEditor
+                value={preScript}
+                onChange={v => setPreScript(v)}
+                language="text"
+                placeholder={`// Available API:\n//   ctx.set(name, value)   — set a variable\n//   ctx.get(name)          — read a variable\n//   ctx.log(...args)       — write to AMQPush logs\n//   ctx.now                — Date.now() at script start\n//   ctx.uuid()             — random UUID v4\n// Globals: Date, Math, JSON, crypto\n\nctx.set("orderId", "ord-" + Math.floor(Math.random() * 100000));\nctx.set("submittedAt", new Date(ctx.now).toISOString());`}
+                minHeight="160px"
+                className="flex-1"
+              />
+            </div>
+
+            <div className="shrink-0 px-3 py-1.5 border-t border-t-line bg-t-panel flex items-center gap-2">
+              <span className="text-[10px] text-t-ink5">
+                Runs once per send (so once per batch iteration too — useful for unique IDs and timestamps).
+              </span>
+              <button
+                onClick={() => {
+                  const r = runPreScript(preScript, userVars);
+                  for (const line of r.logs) onLog("info", `pre-script: ${line}`);
+                  if (r.error) onLog("err", `Pre-script error: ${r.error}`);
+                  else {
+                    const count = Object.keys(r.vars).length;
+                    onLog("ok", `Pre-script ran — ${count} variable${count === 1 ? "" : "s"} set${count > 0 ? `: ${Object.keys(r.vars).join(", ")}` : ""}`);
+                  }
+                }}
+                disabled={!preScript.trim()}
+                className="ml-auto px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors flex items-center gap-1 disabled:opacity-40"
+                title="Run the script once and log the results — useful for testing without sending a message"
+              >
+                <Code2 className="w-3 h-3" /> Test run
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* BATCH TAB */}
         {tab === "batch" && (
           <div className="flex-1 min-h-0 flex flex-col">
@@ -663,23 +1188,77 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
               <span className="text-[11px] text-t-ink4">Send the same message multiple times with optional delay.</span>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-              <div>
-                <label className="block text-[11px] font-medium text-t-ink4 uppercase tracking-wider mb-1.5">Repeat count</label>
-                <input type="number" min="1" value={repeat} onChange={e => setRepeat(e.target.value)}
-                  className={`${INPUT} w-32`} />
-              </div>
-              <div>
-                <label className="block text-[11px] font-medium text-t-ink4 uppercase tracking-wider mb-1.5">Delay between messages (ms)</label>
-                <input type="number" min="0" value={delayMs} onChange={e => setDelayMs(e.target.value)}
-                  className={`${INPUT} w-32`} />
-              </div>
-              {batchActive && (
-                <div className="px-3 py-2 bg-blue-500/5 border border-blue-500/20 rounded-md">
-                  <p className="text-xs text-blue-400">
-                    Will send <span className="font-mono font-bold">{repeat}</span> messages
-                    {Number(delayMs) > 0 && <> with <span className="font-mono">{delayMs}ms</span> delay between them</>}.
-                  </p>
+
+              {/* Enable toggle — same toggle-card pattern as Reply / Connection's TLS. */}
+              <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line">
+                <div className="flex flex-col">
+                  <span className="text-[13px] text-t-ink2">Batch send</span>
+                  <span className="text-[10px] text-t-ink5">Repeat the message N times with an optional delay between each send</span>
                 </div>
+                <Toggle checked={batchEnabled} onChange={setBatchEnabled} ariaLabel="Enable batch send" />
+              </div>
+
+              {/* Batch parameters — disabled when the toggle is off (visual + form-level). */}
+              <div>
+                <SectionLabel className="block mb-2">Batch parameters</SectionLabel>
+                <div className={`bg-t-card border border-t-line rounded-lg p-3 space-y-3 ${batchEnabled ? "" : "opacity-50"}`}>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5">
+                      Repeat count
+                      <span className="text-t-ink5 normal-case font-normal"> — total messages to send</span>
+                    </label>
+                    <input type="number" min="1" value={repeat} onChange={e => setRepeat(e.target.value)} disabled={!batchEnabled}
+                      className={`${INPUT} w-32`} />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5">
+                      Delay between messages
+                      <span className="text-t-ink5 normal-case font-normal"> — milliseconds, 0 = no delay</span>
+                    </label>
+                    <input type="number" min="0" value={delayMs} onChange={e => setDelayMs(e.target.value)} disabled={!batchEnabled}
+                      className={`${INPUT} w-32`} />
+                  </div>
+                </div>
+              </div>
+
+              {batchEnabled && (
+                <Callout variant="info">
+                  Will send <span className="font-mono font-bold">{repeat}</span> messages
+                  {Number(delayMs) > 0 && <> with <span className="font-mono">{delayMs}ms</span> delay between them</>}.
+                </Callout>
+              )}
+
+              {/* ── Schedule (delayed start) ───────────────────────────────────── */}
+              <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line">
+                <div className="flex flex-col">
+                  <span className="text-[13px] text-t-ink2">Schedule send</span>
+                  <span className="text-[10px] text-t-ink5">
+                    Wait N seconds before sending {batchEnabled ? "the first message" : "the message"}.
+                    Useful for testing scheduled jobs and event triggers.
+                  </span>
+                </div>
+                <Toggle checked={scheduleEnabled} onChange={setScheduleEnabled} ariaLabel="Enable scheduled send" />
+              </div>
+
+              <div>
+                <SectionLabel className="block mb-2">Schedule parameters</SectionLabel>
+                <div className={`bg-t-card border border-t-line rounded-lg p-3 space-y-3 ${scheduleEnabled ? "" : "opacity-50"}`}>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5">
+                      Delay before first send
+                      <span className="text-t-ink5 normal-case font-normal"> — seconds; you can cancel during the countdown</span>
+                    </label>
+                    <input type="number" min="0" value={scheduleDelay} onChange={e => setScheduleDelay(e.target.value)} disabled={!scheduleEnabled}
+                      className={`${INPUT} w-32`} />
+                  </div>
+                </div>
+              </div>
+
+              {scheduleEnabled && Number(scheduleDelay) > 0 && (
+                <Callout variant="info">
+                  Click Send and the {batchEnabled ? "first " : ""}message will fire after{" "}
+                  <span className="font-mono font-bold">{scheduleDelay}s</span>.
+                </Callout>
               )}
             </div>
           </div>
@@ -688,50 +1267,80 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         {/* REPLY TAB */}
         {tab === "reply" && (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
+            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
               <span className="text-[11px] text-t-ink4">Wait for a reply on a separate queue after sending.</span>
-              <label className="ml-auto flex items-center gap-2 cursor-pointer">
-                <span className="text-[11px] text-t-ink3">Enabled</span>
-                <div onClick={() => setRrEnabled(e => !e)}
-                  className={`relative w-8 h-4 rounded-full transition-colors ${rrEnabled ? "bg-blue-600" : "bg-t-active"}`}>
-                  <span className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-all ${rrEnabled ? "translate-x-4" : "translate-x-0"}`} />
-                </div>
-              </label>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-              <div>
-                <label className="block text-[11px] font-medium text-t-ink4 uppercase tracking-wider mb-1.5">Reply-to address</label>
-                <input value={rrAddress} onChange={e => setRrAddress(e.target.value)} disabled={!rrEnabled}
-                  placeholder="reply_queue or temp address…"
-                  className={`${INPUT} w-full disabled:opacity-50`} />
+
+              {/* Enable toggle — same toggle-card pattern as Connection's TLS / SASL ANONYMOUS. */}
+              <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line">
+                <div className="flex flex-col">
+                  <span className="text-[13px] text-t-ink2">Wait for reply</span>
+                  <span className="text-[10px] text-t-ink5">Listen on a separate queue after this message is sent</span>
+                </div>
+                <Toggle checked={rrEnabled} onChange={setRrEnabled} ariaLabel="Enable request-reply" />
               </div>
+
+              {/* Reply-target settings card — fields are disabled when the toggle is off. */}
               <div>
-                <label className="block text-[11px] font-medium text-t-ink4 uppercase tracking-wider mb-1.5">Timeout (ms)</label>
-                <input type="number" min="500" value={rrTimeout} onChange={e => setRrTimeout(e.target.value)} disabled={!rrEnabled}
-                  className={`${INPUT} w-32 disabled:opacity-50`} />
+                <SectionLabel className="block mb-2">Reply target</SectionLabel>
+                <div className={`bg-t-card border border-t-line rounded-lg p-3 space-y-3 ${rrEnabled ? "" : "opacity-50"}`}>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5">
+                      Reply-to address
+                      <span className="text-t-ink5 normal-case font-normal"> — queue we'll listen on</span>
+                    </label>
+                    <QueuePicker
+                      value={rrAddress}
+                      onChange={setRrAddress}
+                      connected={connected}
+                      disabled={!rrEnabled}
+                      placeholder="reply_queue or temp address…"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5">
+                      Timeout
+                      <span className="text-t-ink5 normal-case font-normal"> — milliseconds before giving up</span>
+                    </label>
+                    <input type="number" min="500" value={rrTimeout} onChange={e => setRrTimeout(e.target.value)} disabled={!rrEnabled}
+                      className={`${INPUT} w-32`} />
+                  </div>
+                </div>
               </div>
 
               {rrWaiting && (
-                <div className="flex items-center gap-2 p-3 bg-blue-500/5 border border-blue-500/20 rounded-md">
-                  <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin shrink-0" />
-                  <span className="text-xs text-blue-400">Waiting for reply on <span className="font-mono">{rrAddress}</span>…</span>
-                </div>
+                <Callout
+                  variant="info"
+                  icon={<Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                >
+                  Waiting for reply on <span className="font-mono">{rrAddress}</span>…
+                </Callout>
               )}
               {rrTimedOut && !rrWaiting && (
-                <div className="p-3 bg-amber-500/5 border border-amber-500/20 rounded-md">
-                  <span className="text-xs text-amber-500">⏱ Timed out — no reply received within {rrTimeout}ms</span>
-                </div>
+                <Callout variant="warn" icon={<Clock className="w-3.5 h-3.5" />}>
+                  Timed out — no reply received within {rrTimeout}ms
+                </Callout>
               )}
               {rrReply !== null && !rrWaiting && (
-                <div className="rounded-md overflow-hidden border border-green-500/25">
-                  <div className="flex items-center justify-between px-3 py-1.5 bg-green-500/5 border-b border-green-500/20">
-                    <span className="text-xs text-green-500 font-medium">✓ Reply received</span>
-                    <button onClick={() => navigator.clipboard.writeText(rrReply!)} className="text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors">Copy</button>
-                  </div>
-                  <pre className="p-3 text-xs font-mono text-t-ink2 whitespace-pre-wrap break-all max-h-60 overflow-y-auto">
+                <Callout
+                  variant="success"
+                  icon={<CheckCircle className="w-3.5 h-3.5" />}
+                  title="Reply received"
+                  action={
+                    <CopyButton
+                      value={rrReply ?? ""}
+                      onCopied={() => onLog("info", "Reply body copied")}
+                      label="Copy"
+                      title="Copy reply body"
+                      className="flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1.5 py-0.5 rounded hover:bg-t-hover"
+                    />
+                  }
+                >
+                  <pre className="font-mono whitespace-pre-wrap break-all max-h-60 overflow-y-auto">
                     {(() => { try { return JSON.stringify(JSON.parse(rrReply!), null, 2); } catch { return rrReply!; } })()}
                   </pre>
-                </div>
+                </Callout>
               )}
             </div>
           </div>
@@ -761,25 +1370,130 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-2">
               {templates.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-t-ink5">
-                  <BookMarked className="w-8 h-8 mb-3 opacity-40" />
-                  <p className="text-[13px]">No templates saved yet</p>
-                  <p className="text-[11px] mt-1">Click "Save current" above to save one</p>
-                </div>
+                <EmptyState
+                  icon={<BookMarked className="w-8 h-8" />}
+                  title="No templates saved yet"
+                  subtitle='Click "Save current" above to save one'
+                />
               ) : (
                 <div className="space-y-1">
-                  {templates.map(tpl => (
-                    <div key={tpl.name} className="flex items-center gap-2 px-3 py-2 hover:bg-t-hover rounded-md group transition-colors border border-transparent hover:border-t-line">
-                      <button onClick={() => loadTemplate(tpl)} className="flex-1 text-left min-w-0">
-                        <p className="text-[13px] font-medium text-t-ink truncate">{tpl.name}</p>
-                        <p className="text-[10px] text-t-ink5 font-mono truncate">{tpl.address || "no address"}</p>
-                      </button>
-                      <button onClick={() => deleteTemplate(tpl.name)}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 text-t-ink5 hover:text-red-500 transition-all rounded">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ))}
+                  {templates.map(tpl => {
+                    const isRenaming = renamingTpl === tpl.name;
+                    // Detect content kind from saved raw_type, or body shape if missing.
+                    const kind: "json" | "xml" | "text" =
+                      tpl.raw_type === "json" || tpl.raw_type === "xml" || tpl.raw_type === "text"
+                        ? tpl.raw_type
+                        : tpl.body.trimStart().startsWith("{") || tpl.body.trimStart().startsWith("[")
+                          ? "json"
+                          : tpl.body.trimStart().startsWith("<")
+                            ? "xml"
+                            : "text";
+                    const sizeBytes = new TextEncoder().encode(tpl.body).length;
+                    const propsCount = Object.keys(tpl.properties).length;
+                    const varsCount = (tpl.body.match(/\{\{[^}]+\}\}/g) ?? []).length;
+                    // Batch / Reply badges — show only when explicitly on, or
+                    // (for older templates without the flag) inferred from
+                    // non-default values that are sticky in the form.
+                    const batchOn = tpl.batch_enabled === true
+                      || ((tpl.repeat ?? 1) > 1)
+                      || ((tpl.delay_ms ?? 0) > 0);
+                    const replyOn = tpl.reply_enabled === true
+                      || !!(tpl.reply_to && tpl.reply_to.trim());
+                    const kindClass =
+                      kind === "json" ? "bg-blue-500/15 text-blue-500" :
+                      kind === "xml"  ? "bg-violet-500/15 text-violet-500" :
+                                        "bg-t-hover text-t-ink3";
+
+                    return (
+                      <div key={tpl.name}
+                        className="flex flex-col gap-0.5 px-3 py-2 hover:bg-t-hover/50 rounded-md group transition-colors border border-transparent hover:border-t-line">
+
+                        {/* Row 1: name (or rename input) + actions */}
+                        <div className="flex items-center gap-2 min-w-0">
+                          {isRenaming ? (
+                            <>
+                              <input
+                                autoFocus
+                                value={renamingDraft}
+                                onChange={e => setRenamingDraft(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === "Enter") {
+                                    renameTemplate(tpl.name, renamingDraft);
+                                    setRenamingTpl(null);
+                                  }
+                                  if (e.key === "Escape") setRenamingTpl(null);
+                                }}
+                                className={`${INPUT} flex-1 text-[13px] py-1`}
+                              />
+                              <button
+                                onClick={() => { renameTemplate(tpl.name, renamingDraft); setRenamingTpl(null); }}
+                                className="px-2 py-1 bg-blue-600 text-white text-[11px] font-semibold rounded hover:bg-blue-500"
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={() => setRenamingTpl(null)}
+                                className="px-2 py-1 text-t-ink4 text-[11px] hover:text-t-ink hover:bg-t-hover rounded"
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button onClick={() => loadTemplate(tpl)} className="flex-1 text-left min-w-0">
+                                <p className="text-[13px] font-medium text-t-ink truncate">{tpl.name}</p>
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setRenamingTpl(tpl.name); setRenamingDraft(tpl.name); }}
+                                title="Rename template"
+                                className="opacity-0 group-hover:opacity-100 p-1.5 text-t-ink5 hover:text-blue-500 transition-all rounded"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => deleteTemplate(tpl.name)}
+                                title="Delete template"
+                                className="opacity-0 group-hover:opacity-100 p-1.5 text-t-ink5 hover:text-red-500 transition-all rounded"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Row 2: queue address + summary chips */}
+                        {!isRenaming && (
+                          <div className="flex items-center gap-2 text-[10px] flex-wrap">
+                            <span className="font-mono text-t-ink5 truncate" title={tpl.address || "no address"}>
+                              {tpl.address || <span className="italic">no address</span>}
+                            </span>
+                            <span className={`px-1 rounded font-mono font-medium uppercase ${kindClass}`}>{kind}</span>
+                            <span className="text-t-ink5 font-mono">{fmtBytes(sizeBytes)}</span>
+                            {propsCount > 0 && (
+                              <span className="flex items-center gap-0.5 text-t-ink4 font-mono" title={`${propsCount} custom propert${propsCount === 1 ? "y" : "ies"}`}>
+                                <Tag className="w-2.5 h-2.5" />{propsCount}
+                              </span>
+                            )}
+                            {varsCount > 0 && (
+                              <span className="flex items-center gap-0.5 text-blue-500 font-mono" title={`${varsCount} variable token${varsCount === 1 ? "" : "s"} {{…}}`}>
+                                <Braces className="w-2.5 h-2.5" />{varsCount}
+                              </span>
+                            )}
+                            {batchOn && (
+                              <span className="flex items-center gap-0.5 text-amber-500 font-mono" title={`Batch send: ${tpl.repeat ?? "?"}× ${tpl.delay_ms ? `every ${tpl.delay_ms}ms` : ""}`}>
+                                <Repeat2 className="w-2.5 h-2.5" />batch
+                              </span>
+                            )}
+                            {replyOn && (
+                              <span className="flex items-center gap-0.5 text-violet-500 font-mono" title={`Reply to: ${tpl.reply_to ?? ""}`}>
+                                <CornerUpLeft className="w-2.5 h-2.5" />reply
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -789,7 +1503,21 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
 
       {/* ─── STATUS BAR ─────────────────────────────────────────────────── */}
       <div className="shrink-0 px-3 py-1.5 border-t border-t-line bg-t-panel flex items-center gap-2 text-[11px] font-mono">
-        {sending && progress ? (
+        {scheduleRemaining !== null ? (
+          // Schedule countdown — sending is delayed but the user can bail.
+          <>
+            <Clock className="w-3 h-3 text-amber-500 shrink-0" />
+            <span className="text-amber-500">
+              Sending in <span className="font-mono font-bold">{scheduleRemaining}s</span>…
+            </span>
+            <button
+              onClick={cancelSend}
+              className="ml-2 px-2 py-0.5 rounded text-[10px] font-medium text-red-500 hover:bg-red-500/10 transition-colors"
+            >
+              Cancel
+            </button>
+          </>
+        ) : sending && progress ? (
           <>
             <Loader2 className="w-3 h-3 animate-spin text-blue-500 shrink-0" />
             <span className="text-blue-500">
@@ -807,6 +1535,14 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                   style={{ width: `${(progress.current / progress.total) * 100}%` }}
                 />
               </div>
+            )}
+            {progress.total > 1 && (
+              <button
+                onClick={cancelSend}
+                className="ml-1 px-2 py-0.5 rounded text-[10px] font-medium text-red-500 hover:bg-red-500/10 transition-colors"
+              >
+                Cancel
+              </button>
             )}
           </>
         ) : rrWaiting ? (
@@ -872,6 +1608,229 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             </>
           )}
           <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-500" : "bg-t-ink5"}`} />
+        </div>
+      </div>
+
+      {/* ─── SCHEMA MODAL ─── */}
+      {schemaModalOpen && (rawType === "json" || rawType === "xml") && (
+        <SchemaModal
+          language={rawType}
+          value={rawType === "json" ? bodySchemaJson : bodySchemaXsd}
+          onChange={v => rawType === "json" ? setBodySchemaJson(v) : setBodySchemaXsd(v)}
+          result={activeSchemaResult}
+          validating={xsdValidating}
+          bodyEmpty={!text.trim()}
+          onClose={() => setSchemaModalOpen(false)}
+          onLog={onLog}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SchemaModal — reusable modal for editing the active body-validation schema
+// (JSON Schema for JSON bodies, XSD for XML bodies). Supports paste-or-upload
+// of schema text and shows live validation results from the parent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface SchemaModalProps {
+  language: "json" | "xml";
+  value: string;
+  onChange: (v: string) => void;
+  result: null | { ok: boolean; errors: { message: string; instancePath?: string; line?: number }[]; schemaError?: string };
+  validating: boolean;
+  bodyEmpty: boolean;
+  onClose: () => void;
+  onLog: (kind: "info" | "ok" | "err", text: string) => void;
+}
+
+function SchemaModal({
+  language, value, onChange, result, validating, bodyEmpty, onClose, onLog,
+}: SchemaModalProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isJson = language === "json";
+  const title = isJson ? "JSON Schema" : "XML Schema (XSD)";
+  const editorLang = isJson ? "json" : "xml";
+  const placeholder = isJson
+    ? `{\n  "type": "object",\n  "required": ["id"],\n  "properties": {\n    "id": { "type": "string" }\n  }\n}`
+    : `<?xml version="1.0" encoding="UTF-8"?>\n<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n  <xs:element name="root" type="xs:string"/>\n</xs:schema>`;
+  const acceptAttr = isJson ? ".json,application/json" : ".xsd,.xml,application/xml,text/xml";
+
+  // Esc to close
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  async function handleFile(file: File) {
+    try {
+      const text = await file.text();
+      onChange(text);
+      onLog("info", `Loaded ${language === "json" ? "JSON Schema" : "XSD"} from ${file.name}`);
+    } catch (e) {
+      onLog("err", `Failed to read ${file.name}: ${e}`);
+    }
+  }
+
+  function pickFile() {
+    fileInputRef.current?.click();
+  }
+
+  async function onFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (f) await handleFile(f);
+    e.target.value = "";
+  }
+
+  function clearSchema() {
+    onChange("");
+  }
+
+  // Status banner content
+  let statusBanner: ReactNode = null;
+  if (!value.trim()) {
+    statusBanner = (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-t-card border border-t-line text-[12px] text-t-ink4">
+        <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+        <span>No schema configured. Paste or upload a {isJson ? "JSON Schema" : "XSD"} to enable validation.</span>
+      </div>
+    );
+  } else if (validating) {
+    statusBanner = (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-t-card border border-t-line text-[12px] text-t-ink3">
+        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+        <span>Validating…</span>
+      </div>
+    );
+  } else if (bodyEmpty) {
+    statusBanner = (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-t-card border border-t-line text-[12px] text-t-ink4">
+        <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+        <span>Body is empty — nothing to validate yet.</span>
+      </div>
+    );
+  } else if (result?.schemaError) {
+    statusBanner = (
+      <div className="flex items-start gap-2 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/30 text-[12px] text-red-500">
+        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+        <div>
+          <div className="font-medium">Schema is invalid</div>
+          <div className="text-red-400 mt-0.5">{result.schemaError}</div>
+        </div>
+      </div>
+    );
+  } else if (result?.ok) {
+    statusBanner = (
+      <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/30 text-[12px] text-green-500">
+        <CheckCircle className="w-3.5 h-3.5 shrink-0" />
+        <span>Body matches the {isJson ? "JSON Schema" : "XSD"}.</span>
+      </div>
+    );
+  } else if (result && !result.ok) {
+    statusBanner = (
+      <div className="flex flex-col gap-1.5 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/30 text-[12px] text-red-500">
+        <div className="flex items-center gap-2">
+          <XCircle className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-medium">
+            {result.errors.length} validation error{result.errors.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+        <ul className="ml-5 list-disc space-y-0.5 max-h-[160px] overflow-y-auto">
+          {result.errors.slice(0, 50).map((err, i) => (
+            <li key={i} className="text-red-400 break-words">
+              {err.instancePath && <span className="font-mono mr-1">{err.instancePath}:</span>}
+              {err.line !== undefined && <span className="font-mono mr-1">line {err.line}:</span>}
+              <span>{err.message}</span>
+            </li>
+          ))}
+          {result.errors.length > 50 && (
+            <li className="text-red-400">…and {result.errors.length - 50} more</li>
+          )}
+        </ul>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[760px] max-w-[92vw] max-h-[85vh] flex flex-col overflow-hidden"
+      >
+        {/* Header */}
+        <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-t-line bg-t-panel">
+          <ShieldCheck className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] text-t-ink font-medium">{title}</div>
+            <div className="text-[10px] text-t-ink5">
+              Validates the Body against this schema before sending.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={pickFile}
+            className="flex items-center gap-1 text-[11px] text-t-ink3 hover:text-blue-500 px-2 py-1 rounded transition-colors border border-t-line2 hover:border-blue-500/50"
+            title={`Upload ${isJson ? "JSON Schema" : "XSD"} file from disk`}
+          >
+            <FileUp className="w-3 h-3" /> Upload…
+          </button>
+          {value.trim() && (
+            <button
+              type="button"
+              onClick={clearSchema}
+              className="flex items-center gap-1 text-[11px] text-t-ink4 hover:text-red-500 px-2 py-1 rounded transition-colors"
+              title="Clear schema"
+            >
+              <Trash2 className="w-3 h-3" /> Clear
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1 rounded text-t-ink4 hover:text-t-ink hover:bg-t-hover"
+            aria-label="Close"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={acceptAttr}
+            className="hidden"
+            onChange={onFileChange}
+          />
+        </div>
+
+        {/* Editor */}
+        <div className="flex-1 min-h-0 flex flex-col p-3 gap-2 overflow-hidden">
+          <div className="flex-1 min-h-[240px] overflow-hidden border border-t-line2 rounded-md">
+            <CodeEditor
+              value={value}
+              onChange={onChange}
+              language={editorLang}
+              placeholder={placeholder}
+              minHeight="240px"
+              className="h-full"
+            />
+          </div>
+          {statusBanner}
+        </div>
+
+        {/* Footer */}
+        <div className="shrink-0 px-3 py-2 border-t border-t-line bg-t-panel flex items-center gap-3 text-[10px] text-t-ink5">
+          <span>
+            {isJson
+              ? "Pass a JSON Schema (Draft-07 or 2020-12)."
+              : "Pass an XSD document; xmllint validates the body against it."}
+          </span>
+          <span className="ml-auto flex items-center gap-1">
+            <kbd className="font-mono px-1 py-0.5 border border-t-line rounded">Esc</kbd> close
+          </span>
         </div>
       </div>
     </div>
