@@ -3,6 +3,7 @@ import {
   ChangeEvent, KeyboardEvent, InputHTMLAttributes,
 } from "react";
 import { VariableSuggestion } from "./CodeEditor";
+import { AutocompletePopup } from "./autocompleteShared";
 
 /**
  * Plain `<input>` with `{{token}}` autocomplete — same idea as the
@@ -57,13 +58,18 @@ export default function TokenInput({
     return { start: open2, partial: between.trim() };
   }, [suggestions]);
 
-  /** Suggestions filtered against the current partial text — case-insensitive
-   *  prefix match first, substring match second so typing "id" still finds
-   *  `correlation_id`. */
+  /** Suggestions filtered against the current partial text. Order matches
+   *  CodeMirror's default behaviour:
+   *   - When no partial is typed (just `{{`), show everything sorted
+   *     alphabetically by name.
+   *   - When the user has typed something, prefix matches come first
+   *     (each block sorted alphabetically), then substring matches.
+   *  Without this both popups had different orderings on the same input. */
   const filtered = useMemo(() => {
     if (!suggestions) return [];
+    const byName = (a: VariableSuggestion, b: VariableSuggestion) => a.name.localeCompare(b.name);
     const q = partial.toLowerCase();
-    if (!q) return suggestions.slice(0, 50);
+    if (!q) return [...suggestions].sort(byName).slice(0, 50);
     const prefix: VariableSuggestion[] = [];
     const sub: VariableSuggestion[] = [];
     for (const s of suggestions) {
@@ -71,6 +77,8 @@ export default function TokenInput({
       if (n.startsWith(q)) prefix.push(s);
       else if (n.includes(q)) sub.push(s);
     }
+    prefix.sort(byName);
+    sub.sort(byName);
     return [...prefix, ...sub].slice(0, 50);
   }, [suggestions, partial]);
 
@@ -157,66 +165,14 @@ export default function TokenInput({
         className={className}
         {...rest}
       />
-      {open && filtered.length > 0 && (() => {
-        // CodeMirror renders one letter per "type" (e.g. `c` for constant /
-        // built-in, `v` for variable). Mirror that — built-in tokens get a
-        // dim italic `c`, user-supplied ones get `v`. Anything else falls
-        // back to a blank space so columns stay aligned.
-        function typeIcon(group?: string): string {
-          if (!group) return " ";
-          if (group === "user variable") return "v";
-          return "c"; // built-in / faker / etc.
-        }
-        const active = filtered[activeIdx];
-        return (
-          // Outer wrapper carries the popup AND the side info panel so they
-          // visually pair like CodeMirror's `cm-tooltip-autocomplete` +
-          // `cm-completionInfo`. flex-row with gap so the side panel sits
-          // immediately to the right of the list.
-          <div
-            className="absolute left-0 top-full mt-1 z-30 flex items-start gap-2 font-mono text-[12px]"
-            onMouseDown={e => e.preventDefault()}
-          >
-            {/* Main popup — bg-t-card, border-t-line, 6 px radius, soft
-                shadow; identical to CodeMirror's tooltip rules. Width is
-                intrinsic (`w-max`) so the popup hugs its longest item the
-                same way CodeMirror's does, with a small floor for stability
-                when only one short match is filtered. */}
-            <div className="w-max min-w-[180px] bg-t-card border border-t-line rounded-md text-t-ink shadow-[0_4px_12px_rgba(0,0,0,0.15)] overflow-hidden">
-              <ul className="max-h-60 overflow-y-auto m-0 p-0 list-none">
-                {filtered.map((s, i) => (
-                  <li
-                    key={s.name}
-                    onMouseEnter={() => setActiveIdx(i)}
-                    onClick={() => handleSelect(s.name)}
-                    aria-selected={i === activeIdx}
-                    className={`flex items-baseline gap-2 px-2 py-[3px] cursor-pointer ${
-                      i === activeIdx ? "bg-t-selection/[0.18]" : ""
-                    }`}
-                  >
-                    <span className="text-t-ink5 italic w-3 shrink-0">{typeIcon(s.group)}</span>
-                    <span className={i === activeIdx ? "text-t-ink" : "text-t-ink2"}>
-                      {s.name}
-                    </span>
-                    {s.group && (
-                      <span className="text-t-ink5 italic">{s.group}</span>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Side info panel — only when the active item has a
-                description. Matches CodeMirror's `cm-completionInfo`:
-                bg-t-panel, border-t-line, 11 px, narrow max-width. */}
-            {active?.description && (
-              <div className="bg-t-panel border border-t-line rounded-md px-2 py-1.5 text-[11px] text-t-ink2 max-w-[320px] shadow-[0_4px_12px_rgba(0,0,0,0.15)]">
-                {active.description}
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {open && (
+        <AutocompletePopup
+          items={filtered}
+          activeIdx={activeIdx}
+          onPick={s => handleSelect(s.name)}
+          onHover={setActiveIdx}
+        />
+      )}
     </div>
   );
 }

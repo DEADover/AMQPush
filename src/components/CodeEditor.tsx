@@ -5,6 +5,7 @@ import { EditorView } from "@codemirror/view";
 import { autocompletion, CompletionContext, CompletionResult } from "@codemirror/autocomplete";
 import { useMemo } from "react";
 import { useTheme } from "../hooks/useTheme";
+import { cmAutocompleteTheme } from "./autocompleteShared";
 
 export type EditorLanguage = "json" | "xml" | "text";
 
@@ -72,41 +73,8 @@ const appBaseTheme = EditorView.baseTheme({
     outline: "none",
   },
   ".cm-placeholder": { color: "rgb(var(--t-ink5))" },
-  // Autocomplete popup — match the rest of the app's `bg-t-card border-t-line` look.
-  ".cm-tooltip.cm-tooltip-autocomplete": {
-    background: "rgb(var(--t-card))",
-    border: "1px solid rgb(var(--t-line))",
-    borderRadius: "6px",
-    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-    color: "rgb(var(--t-ink))",
-    fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
-    fontSize: "12px",
-  },
-  ".cm-tooltip.cm-tooltip-autocomplete > ul": {
-    fontFamily: "inherit",
-    maxHeight: "240px",
-  },
-  ".cm-tooltip.cm-tooltip-autocomplete > ul > li": {
-    padding: "3px 8px",
-  },
-  ".cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]": {
-    background: "rgb(var(--t-selection) / 0.18)",
-    color: "rgb(var(--t-ink))",
-  },
-  ".cm-completionLabel": { color: "rgb(var(--t-ink2))" },
-  ".cm-completionDetail": {
-    color: "rgb(var(--t-ink5))",
-    fontStyle: "normal",
-    marginLeft: "8px",
-  },
-  ".cm-completionInfo": {
-    background: "rgb(var(--t-panel))",
-    border: "1px solid rgb(var(--t-line))",
-    color: "rgb(var(--t-ink2))",
-    padding: "6px 8px",
-    fontSize: "11px",
-    maxWidth: "320px",
-  },
+  // Autocomplete popup styling lives in `autocompleteShared.ts` and is added
+  // as a separate base theme below — see `extensions` in this component.
 });
 
 /**
@@ -175,6 +143,9 @@ export default function CodeEditor({
       // wins over generic word-completion. Users still get the normal
       // close-brackets / indent behaviour from basicSetup.
       exts.push(autocompletion({ override: [variableCompletionSource(variables)] }));
+      // Shared popup theme — same constants drive the plain-input dropdown
+      // (TokenInput) so the two stay visually identical.
+      exts.push(cmAutocompleteTheme);
     }
     return exts;
   }, [language, variables]);
