@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.svg" alt="AMQPush — A modern desktop client for AMQP 1.0 brokers" width="100%"/>
+</p>
+
 # AMQPush
 
 A modern desktop client for **AMQP 1.0** brokers — built with Tauri 2 + Rust + React.
