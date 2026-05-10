@@ -4,6 +4,65 @@ All notable changes to AMQPush are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-05-10
+
+### Highlights
+- **CSV-driven bulk send** — load a spreadsheet, each row becomes a message. Column headers turn into `{{column_name}}` tokens that resolve per-row in Body and Properties; live progress, abort, and a dry-run preview let you sanity-check substitutions before kicking off a thousand-message batch.
+- **Broker-side selectors in Subscribe** — JMS-style filter expression (`priority > 5 AND application_property:type = 'order'`) attached as an AMQP 1.0 source filter via `apache.org:selector-filter:string`. The broker filters; you only pay the wire cost for messages you care about.
+- **DLQ inspector + requeue** — Browser detects dead-letter queues by name (`DLQ`, `*.DLQ`, `_dlq`, `dead`, etc.) and surfaces a banner plus a green **Requeue all** button. Each message is republished to its `_AMQ_ORIG_ADDRESS` (Artemis) / `originalDestination` (Classic) with internal markers stripped so the broker doesn't immediately re-DLQ the copy. Per-message **Requeue → \<origin\>** action on the details pane too.
+- **Profile workspaces** — group your saved brokers under labels like `Dev` / `Staging` / `Prod` (or per service / project). Workspaces drive sectioned headers in the global profile picker and the Cmd+K palette so a setup with 20+ profiles stops feeling unwieldy.
+- **Faker tokens in Variables** — 35+ new built-in tokens for realistic-looking test data: `{{faker.email}}`, `{{faker.fullName}}`, `{{faker.creditCardNumber}}`, `{{faker.iban}}`, `{{faker.streetAddress}}`, `{{faker.lorem(N)}}`, and many more. Powered by `@faker-js/faker`.
+
+### Added — Send view
+
+#### CSV bulk send (new tab)
+- New **CSV** tab in the Send view with a dropzone / file picker for any well-formed CSV (parsed via `papaparse`, RFC 4180-compliant).
+- Header row drives the column-token catalogue: clicking a `{{column_name}}` chip copies it to the clipboard for paste into Body / Properties.
+- **Preview table** shows the first 5 rows with click-to-select; the highlighted row drives the **Dry-run preview** that shows exactly how the Body resolves after substitution (so you spot a mistyped column before you blast 10 000 messages out).
+- **Send N messages** action loops over every row, runs Pre-script per iteration with column values available via `ctx.get("col_name")`, applies token substitution to Body and every Property value, sends. Live progress bar with ok / fail counts.
+- **Cancel** mid-batch via an `AbortController` — the loop exits cleanly at the next iteration boundary.
+- Configurable per-row delay (`csv_delay`), useful for pacing against rate-limited consumers.
+- Schema validation is intentionally skipped in CSV mode — the tab is optimised for throughput; validate on a single representative row in the regular Send view first if you need a guard.
+
+### Added — Variables
+
+- **Faker token namespace** — `{{faker.<path>}}` and `{{faker.<path>(<arg>)}}` covering people (firstName / lastName / fullName / jobTitle / gender), internet (email / username / url / domain / userAgent / password / ip / ipv6 / macAddress / phone), address (streetAddress / city / state / country / countryCode / zipCode / latitude / longitude), finance (creditCardNumber / creditCardCvv / creditCardExpiry / iban / bic / currency / amount), commerce (companyName / productName / productPrice / department), and text (lorem / loremParagraph / word).
+- All faker tokens surface in the existing autocompletion dropdown and the Variables tab "Built-in presets" list with descriptions.
+- Auto-detect of the Raw subtype now keeps a manual JSON / XML pick when the editor is empty (regression noticed in 1.2.0): the dropdown sticks until you actually clear non-empty content.
+
+### Added — Subscribe view
+
+- New **Selector** input — toggleable input below the queue picker accepts a JMS-style filter expression. Sent to `start_subscriber` as the new `selector` parameter; the Rust side packages it into an AMQP source filter set with descriptor `apache.org:selector-filter:string`.
+- Active-subscription chips now show a small filter-icon badge when a selector is set; the tooltip surfaces the actual selector text so you can confirm what's running.
+- Compatible with Artemis, ActiveMQ Classic, Qpid Broker-J. Brokers that don't support the filter typically reject the attach with a clear error message we surface in the log.
+
+### Added — Browser view (DLQ tooling)
+
+- **DLQ detection** — the peek pane recognises queues named `DLQ`, `*.DLQ`, `*_dlq`, `ActiveMQ.DLQ`, `ExpiryQueue`, or anything containing "dlq" / "dead" (case-insensitive).
+- **DLQ banner** appears under the peek-pane header explaining how requeue works and which property carries the original destination on the user's broker.
+- **Requeue all** button (next to Purge) — iterates the peeked messages, looks up `_AMQ_ORIG_ADDRESS` / `_AMQ_ORIG_QUEUE` (Artemis) or `originalDestination` / `JMSXOriginalDestination` (Classic), republishes each to its origin via the existing `send_message` command. Internal markers are stripped from the republished copy so the broker doesn't re-DLQ it on first failure.
+- **Requeue → \<origin\>** chip on the per-message details pane for selective requeue.
+- Progress counter (`Requeue 7/24`) replaces the button label while a bulk requeue is in flight.
+
+### Added — Connection / profiles
+
+- New **Workspace** field on every profile (free-form text, datalist autocomplete from existing labels). Empty → `Default`.
+- The **header profile picker** groups profiles under `<DropdownSection>` headers per workspace; user-named groups float to the top, `Default` always last.
+- The **Cmd+K palette** uses workspace as the category for profile-switch actions: `Profiles · Dev`, `Profiles · Staging`, etc., so fuzzy search like `dev p` matches Dev profiles before others.
+- Backward-compatible: legacy profiles without a `workspace` key are loaded as `Default` via Rust `#[serde(default)]`.
+
+### Backend
+- New direct dep `serde_amqp = "0.14"` (already pulled in transitively by `fe2o3-amqp-types`, zero compile cost) — used to construct `Described<Value>` + `Descriptor` for the JMS-selector filter set.
+- New direct deps on the frontend: `@faker-js/faker` (English locale, ~700 KB) and `papaparse` (RFC 4180 CSV parser, ~30 KB).
+- `subscriber::start` signature gained a `selector: String` parameter; `Receiver::builder().source(Source { filter, ... }).attach(...)` is used when the selector is non-empty, falling back to the simpler `Receiver::attach` path otherwise.
+- `start_subscriber` Tauri command takes an optional `selector: Option<String>` (backward compat: callers that omit it get no-filter behaviour).
+- `Profile` struct (Rust + TS) gained a `workspace` field with `#[serde(default = "default_workspace")]` so older `profiles.json` files load as `Default`.
+
+### Fixed
+- Auto-detect of the Send view's Raw subtype no longer reverts the user's manual JSON / XML pick when they clear the editor before content arrives — picking a type in an empty buffer now sticks.
+
+---
+
 ## [1.2.0] — 2026-05-10
 
 ### Highlights
@@ -203,6 +262,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Light / dark / system theme.
 - Logs view with persistent localStorage backing.
 
+[1.3.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.3.0
 [1.2.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.2.0
 [1.1.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.1.0
 [1.0.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.0.0

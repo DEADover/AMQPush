@@ -1,12 +1,37 @@
 use chrono::Local;
 use fe2o3_amqp::{Receiver, Session};
-use fe2o3_amqp_types::messaging::Body;
-use fe2o3_amqp_types::primitives::Value;
+use fe2o3_amqp_types::messaging::{Body, FilterSet, Source};
+use fe2o3_amqp_types::primitives::{Symbol, Value};
 use serde::Serialize;
+use serde_amqp::descriptor::Descriptor;
+use serde_amqp::described::Described;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::broker::{extract_peeked, PeekedMessage};
+
+/// Build the AMQP 1.0 filter set carrying a JMS-style selector. The descriptor
+/// `apache.org:selector-filter:string` is the de-facto standard understood by
+/// Artemis, ActiveMQ Classic, and Qpid; the value is the selector text
+/// (e.g. `priority > 5 AND type = 'order'`). Returns `None` for an empty /
+/// whitespace-only selector so callers can keep the no-selector code path
+/// untouched.
+fn selector_filter(selector: &str) -> Option<FilterSet> {
+    let s = selector.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut fs = FilterSet::new();
+    let descriptor_name = Symbol::from("apache.org:selector-filter:string");
+    fs.insert(
+        descriptor_name.clone(),
+        Value::Described(Box::new(Described {
+            descriptor: Descriptor::Name(descriptor_name),
+            value: Value::String(s.to_string()),
+        })),
+    );
+    Some(fs)
+}
 
 /// Live message pushed to the UI by the subscriber. Mirrors `PeekedMessage`
 /// from broker.rs so Receive view can render the same rich detail panel as
@@ -54,6 +79,9 @@ struct SubParams {
     password: String,
     use_tls: bool,
     tls_skip_verify: bool,
+    /// JMS-style selector (e.g. `priority > 5`). Empty / whitespace = no filter,
+    /// receiver attaches with no source filter (broker delivers everything).
+    selector: String,
 }
 
 async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connection::ConnectionHandle<()>, fe2o3_amqp::session::SessionHandle<()>), String> {
@@ -72,9 +100,28 @@ async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connect
     // Use a UUID-based link name so multiple receivers in the same session
     // don't collide on link names (some brokers reject duplicate names).
     let link_name = format!("amqpush-recv-{}", Uuid::new_v4());
-    let receiver = Receiver::attach(&mut session, link_name, &p.address)
-        .await
-        .map_err(|e| format!("Subscriber link failed: {e}"))?;
+
+    // If a selector is set, build the receiver via the source-builder path so
+    // we can attach the JMS selector filter; otherwise fall back to the simple
+    // attach (kept for backward parity — no behavioural change for users who
+    // never set a selector).
+    let receiver = match selector_filter(&p.selector) {
+        Some(filter) => {
+            let source = Source::builder()
+                .address(p.address.clone())
+                .filter(filter)
+                .build();
+            Receiver::builder()
+                .name(link_name)
+                .source(source)
+                .attach(&mut session)
+                .await
+                .map_err(|e| format!("Subscriber link failed (with selector): {e}"))?
+        }
+        None => Receiver::attach(&mut session, link_name, &p.address)
+            .await
+            .map_err(|e| format!("Subscriber link failed: {e}"))?,
+    };
 
     Ok((receiver, connection, session))
 }
@@ -87,6 +134,7 @@ pub async fn start(
     password: &str,
     use_tls: bool,
     tls_skip_verify: bool,
+    selector: String,
     app: AppHandle,
 ) -> Result<SubscriberHandle, String> {
     let params = SubParams {
@@ -97,6 +145,7 @@ pub async fn start(
         password: password.to_string(),
         use_tls,
         tls_skip_verify,
+        selector,
     };
 
     // Initial connection attempt (fail fast, surface error to UI)

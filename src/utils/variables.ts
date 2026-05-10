@@ -1,9 +1,79 @@
+import { faker } from "@faker-js/faker/locale/en";
+
 export interface UserVariable {
   id: number;
   enabled: boolean;
   key: string;
   value: string;
   description: string;
+}
+
+/**
+ * Resolve a `{{faker.<path>}}` or `{{faker.<path>(<arg>)}}` token. Returns
+ * the generated value (always a string), or `null` if the path isn't
+ * recognised — the caller leaves the original token intact in that case.
+ *
+ * Designed to be cheap: faker is bundled at module load (it's a desktop
+ * app, no first-paint constraint), and each resolver call is just a thin
+ * wrapper around one or two faker functions.
+ */
+function resolveFakerToken(path: string, arg?: string): string | null {
+  switch (path) {
+    // ── People ─────────────────────────────────────────────────────────
+    case "firstName":         return faker.person.firstName();
+    case "lastName":          return faker.person.lastName();
+    case "fullName":          return faker.person.fullName();
+    case "jobTitle":          return faker.person.jobTitle();
+    case "gender":            return faker.person.gender();
+
+    // ── Internet / contact ─────────────────────────────────────────────
+    case "email":             return faker.internet.email().toLowerCase();
+    case "username":          return faker.internet.username();
+    case "url":               return faker.internet.url();
+    case "domain":            return faker.internet.domainName();
+    case "userAgent":         return faker.internet.userAgent();
+    case "password":          return faker.internet.password();
+    case "ip":                return faker.internet.ipv4();
+    case "ipv6":              return faker.internet.ipv6();
+    case "macAddress":        return faker.internet.mac();
+    case "phone":             return faker.phone.number();
+
+    // ── Address ────────────────────────────────────────────────────────
+    case "streetAddress":     return faker.location.streetAddress();
+    case "city":              return faker.location.city();
+    case "state":             return faker.location.state();
+    case "country":           return faker.location.country();
+    case "countryCode":       return faker.location.countryCode();
+    case "zipCode":           return faker.location.zipCode();
+    case "latitude":          return faker.location.latitude().toString();
+    case "longitude":         return faker.location.longitude().toString();
+
+    // ── Finance ────────────────────────────────────────────────────────
+    case "creditCardNumber":  return faker.finance.creditCardNumber();
+    case "creditCardCvv":     return faker.finance.creditCardCVV();
+    case "creditCardExpiry":  return faker.date.future({ years: 5 }).toISOString().slice(0, 7);
+    case "iban":              return faker.finance.iban();
+    case "bic":               return faker.finance.bic();
+    case "currency":          return faker.finance.currencyCode();
+    case "amount":            return faker.finance.amount();
+
+    // ── Company / commerce ─────────────────────────────────────────────
+    case "companyName":       return faker.company.name();
+    case "productName":       return faker.commerce.productName();
+    case "productPrice":      return faker.commerce.price();
+    case "department":        return faker.commerce.department();
+
+    // ── Text ───────────────────────────────────────────────────────────
+    case "lorem": {
+      // {{faker.lorem}} → 1 sentence; {{faker.lorem(N)}} → N words
+      const n = arg ? parseInt(arg, 10) : NaN;
+      return Number.isFinite(n) && n > 0 ? faker.lorem.words(n) : faker.lorem.sentence();
+    }
+    case "loremParagraph":    return faker.lorem.paragraph();
+    case "word":              return faker.lorem.word();
+
+    default:                  return null;
+  }
 }
 
 /**
@@ -173,7 +243,15 @@ export function applyVariables(text: string, userVars: UserVariable[] = []): str
     .replace(/\{\{day\}\}/g,          () => pad(now.getDate()))
     .replace(/\{\{hour\}\}/g,         () => pad(now.getHours()))
     .replace(/\{\{minute\}\}/g,       () => pad(now.getMinutes()))
-    .replace(/\{\{second\}\}/g,       () => pad(now.getSeconds()));
+    .replace(/\{\{second\}\}/g,       () => pad(now.getSeconds()))
+
+    // ── Faker tokens — {{faker.<path>}} or {{faker.<path>(<arg>)}} ──────
+    //   Single regex catches every faker.* token; resolveFakerToken does the
+    //   actual lookup. Unknown paths are left intact (regex doesn't match).
+    .replace(/\{\{faker\.(\w+)(?:\(([^)]*)\))?\}\}/g, (orig, path, arg) => {
+      const v = resolveFakerToken(path, arg);
+      return v === null ? orig : v;
+    });
 }
 
 /**
@@ -213,4 +291,50 @@ export const VARIABLE_HINTS: { token: string; description: string }[] = [
   { token: "{{hour}}",                 description: "Current hour (00–23, local)" },
   { token: "{{minute}}",               description: "Current minute (00–59, local)" },
   { token: "{{second}}",               description: "Current second (00–59, local)" },
+
+  // ── Faker — fake but realistic data (powered by @faker-js/faker) ─────
+  // People
+  { token: "{{faker.firstName}}",         description: "Faker · random first name" },
+  { token: "{{faker.lastName}}",          description: "Faker · random last name" },
+  { token: "{{faker.fullName}}",          description: "Faker · full name (first + last)" },
+  { token: "{{faker.jobTitle}}",          description: "Faker · job title (e.g. \"Lead Brand Producer\")" },
+  { token: "{{faker.gender}}",            description: "Faker · gender" },
+  // Internet / contact
+  { token: "{{faker.email}}",             description: "Faker · realistic email address" },
+  { token: "{{faker.username}}",          description: "Faker · username (e.g. \"john.doe42\")" },
+  { token: "{{faker.url}}",               description: "Faker · URL with realistic domain" },
+  { token: "{{faker.domain}}",            description: "Faker · domain name" },
+  { token: "{{faker.userAgent}}",         description: "Faker · browser User-Agent string" },
+  { token: "{{faker.password}}",          description: "Faker · password (15 chars)" },
+  { token: "{{faker.ip}}",                description: "Faker · IPv4 address" },
+  { token: "{{faker.ipv6}}",              description: "Faker · IPv6 address" },
+  { token: "{{faker.macAddress}}",        description: "Faker · MAC address" },
+  { token: "{{faker.phone}}",             description: "Faker · phone number" },
+  // Address
+  { token: "{{faker.streetAddress}}",     description: "Faker · street address" },
+  { token: "{{faker.city}}",              description: "Faker · city name" },
+  { token: "{{faker.state}}",             description: "Faker · US state name" },
+  { token: "{{faker.country}}",           description: "Faker · country name" },
+  { token: "{{faker.countryCode}}",       description: "Faker · ISO 3166 country code" },
+  { token: "{{faker.zipCode}}",           description: "Faker · ZIP / postal code" },
+  { token: "{{faker.latitude}}",          description: "Faker · latitude" },
+  { token: "{{faker.longitude}}",         description: "Faker · longitude" },
+  // Finance
+  { token: "{{faker.creditCardNumber}}",  description: "Faker · Luhn-valid credit-card number" },
+  { token: "{{faker.creditCardCvv}}",     description: "Faker · 3-digit CVV" },
+  { token: "{{faker.creditCardExpiry}}",  description: "Faker · YYYY-MM expiry" },
+  { token: "{{faker.iban}}",              description: "Faker · IBAN bank account" },
+  { token: "{{faker.bic}}",               description: "Faker · BIC / SWIFT code" },
+  { token: "{{faker.currency}}",          description: "Faker · ISO currency code (e.g. EUR)" },
+  { token: "{{faker.amount}}",            description: "Faker · monetary amount (decimal string)" },
+  // Company / commerce
+  { token: "{{faker.companyName}}",       description: "Faker · company name" },
+  { token: "{{faker.productName}}",       description: "Faker · product name" },
+  { token: "{{faker.productPrice}}",      description: "Faker · product price (decimal string)" },
+  { token: "{{faker.department}}",        description: "Faker · commerce department" },
+  // Text
+  { token: "{{faker.lorem}}",             description: "Faker · single lorem-ipsum sentence" },
+  { token: "{{faker.lorem(N)}}",          description: "Faker · N lorem-ipsum words" },
+  { token: "{{faker.loremParagraph}}",    description: "Faker · paragraph of lorem ipsum" },
+  { token: "{{faker.word}}",              description: "Faker · single random word" },
 ];

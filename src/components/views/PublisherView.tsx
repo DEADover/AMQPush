@@ -4,8 +4,9 @@ import {
   Send, Plus, X, FileUp, Type, Repeat2,
   Wand2, BookMarked, Save, Trash2, Braces, CornerDownLeft, Loader2, Tag,
   CheckCircle, XCircle, Clock, ChevronDown, Pencil, CornerUpLeft, Code2,
-  ShieldCheck, AlertTriangle,
+  ShieldCheck, AlertTriangle, FileSpreadsheet, Square,
 } from "lucide-react";
+import Papa from "papaparse";
 import { PropertyRow, SendResult, Template } from "../../types";
 import QueuePicker from "../QueuePicker";
 import { applyVariables, runPreScript, VARIABLE_HINTS, UserVariable } from "../../utils/variables";
@@ -46,7 +47,7 @@ const INPUT = "bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[1
 type BodyMode = "none" | "raw" | "binary";
 type RawType  = "text" | "json" | "xml";
 type ContentHint = "text" | "json" | "xml";
-type TabKey = "body" | "properties" | "variables" | "prescript" | "batch" | "reply" | "templates";
+type TabKey = "body" | "properties" | "variables" | "prescript" | "batch" | "csv" | "reply" | "templates";
 
 /** Single Ajv instance reused across renders — keeps the underlying compile
  *  cache warm so re-validating after a tiny edit doesn't re-compile from
@@ -190,6 +191,25 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   const [scheduleRemaining, setScheduleRemaining] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [sending,    setSending]    = useState(false);
+
+  // ── CSV bulk send ────────────────────────────────────────────────────────
+  // Loaded CSV rows + headers. Each row is sent as a separate message; the
+  // column values are layered on top of user-defined Variables (CSV wins on
+  // key collision) for that one iteration. `csvDryRunIdx` selects which row
+  // is rendered in the substitution preview so users can sanity-check that
+  // their `{{column_name}}` tokens resolve before kicking off the batch.
+  const [csvFileName, setCsvFileName] = useState<string | null>(null);
+  const [csvHeaders,  setCsvHeaders]  = useState<string[]>([]);
+  const [csvRows,     setCsvRows]     = useState<string[][]>([]);
+  const [csvParseError, setCsvParseError] = useState<string | null>(null);
+  const [csvDryRunIdx,  setCsvDryRunIdx]  = useState(0);
+  const [csvDelay,    setCsvDelay]    = useState("0");
+  const [csvProgress, setCsvProgress] = useState<{ done: number; total: number; ok: number; failed: number } | null>(null);
+  const csvAbortRef = useRef<AbortController | null>(null);
+  const csvFileInputRef = useRef<HTMLInputElement>(null);
+  /** True while a file is being dragged over the CSV dropzone — drives the
+   *  visual feedback. */
+  const [csvDragOver, setCsvDragOver] = useState(false);
   /** JavaScript source that runs before each send. Set vars via `ctx.set(name, value)`. */
   const [preScript,  setPreScript]  = useState("");
   /** Per-language schema sources. The active schema for the current Raw
@@ -562,6 +582,170 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     setTab("body");
   }
 
+  // ── CSV: parsing ─────────────────────────────────────────────────────────
+  function loadCsvFile(file: File) {
+    setCsvFileName(file.name);
+    setCsvParseError(null);
+    Papa.parse<string[]>(file, {
+      skipEmptyLines: true,
+      complete(results) {
+        const data = results.data as string[][];
+        if (results.errors.length > 0) {
+          setCsvParseError(results.errors[0]?.message ?? "Unknown parser error");
+        }
+        if (data.length === 0) {
+          setCsvHeaders([]);
+          setCsvRows([]);
+          setCsvParseError("File is empty");
+          return;
+        }
+        // First row is the header row. Empty headers fall back to "col_N".
+        const rawHeaders = data[0] ?? [];
+        const headers = rawHeaders.map((h, i) => h?.trim() || `col_${i + 1}`);
+        const rows = data.slice(1).filter(r => r.some(c => c?.length > 0));
+        setCsvHeaders(headers);
+        setCsvRows(rows);
+        setCsvDryRunIdx(0);
+        onLog("info", `CSV loaded: ${rows.length} rows, ${headers.length} columns`);
+      },
+      error(err) {
+        setCsvParseError(err.message);
+        onLog("err", `CSV parse failed: ${err.message}`);
+      },
+    });
+  }
+
+  function clearCsv() {
+    setCsvFileName(null);
+    setCsvHeaders([]);
+    setCsvRows([]);
+    setCsvParseError(null);
+    setCsvDryRunIdx(0);
+  }
+
+  /** Build a UserVariable[] for a single CSV row. Column headers become keys,
+   *  cell values become values; we mark them with a description so the user
+   *  knows where a token resolved from when they look at logs. */
+  function csvRowToVars(row: string[]): UserVariable[] {
+    return csvHeaders.map((h, i) => ({
+      id: -(i + 1), // negative ids so they don't collide with form-allocated ones
+      enabled: true,
+      key: h,
+      value: row[i] ?? "",
+      description: "(csv)",
+    }));
+  }
+
+  /** Resolve the body text for a given CSV row index, layering CSV columns on
+   *  top of user-defined Variables. Used for the dry-run preview AND the
+   *  actual send loop, so the preview reflects exactly what will go out. */
+  function resolveBodyForCsvRow(idx: number): string {
+    if (mode !== "raw" || !text.trim()) return "";
+    const row = csvRows[idx];
+    if (!row) return text;
+    const merged = [...csvRowToVars(row), ...userVars];
+    return applyVariables(text.trim(), merged);
+  }
+
+  // ── CSV: bulk-send loop ──────────────────────────────────────────────────
+  async function sendCsvBatch() {
+    if (!connected)        { onLog("err", "Not connected"); return; }
+    if (!address.trim())   { onLog("err", "Queue address is required"); return; }
+    if (mode !== "raw")    { onLog("err", "CSV bulk send requires Body mode = Raw"); return; }
+    if (!text.trim())      { onLog("err", "Body is empty"); return; }
+    if (csvRows.length === 0) { onLog("err", "Load a CSV file first"); return; }
+
+    const ctrl = new AbortController();
+    csvAbortRef.current = ctrl;
+    const total = csvRows.length;
+    const delayMs = Math.max(0, Number(csvDelay) || 0);
+    let ok = 0;
+    let failed = 0;
+    setCsvProgress({ done: 0, total, ok: 0, failed: 0 });
+
+    const startedAt = Date.now();
+    let totalBytes = 0;
+
+    try {
+      for (let i = 0; i < total; i++) {
+        if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (i > 0 && delayMs > 0) await abortableDelay(delayMs, ctrl.signal);
+
+        const row = csvRows[i];
+        const csvVars = csvRowToVars(row);
+
+        // Pre-script: each row gets a fresh run with CSV vars merged in,
+        // so scripts can read columns via `ctx.get("col_name")`.
+        let varsForRow: UserVariable[] = [...csvVars, ...userVars];
+        if (preScript.trim()) {
+          const r = runPreScript(preScript, varsForRow);
+          for (const line of r.logs) onLog("info", `pre-script (row ${i + 1}): ${line}`);
+          if (r.error) {
+            failed++;
+            setCsvProgress({ done: i + 1, total, ok, failed });
+            onLog("err", `Pre-script error on row ${i + 1}: ${r.error}`);
+            continue;
+          }
+          const overrides: UserVariable[] = Object.entries(r.vars).map(([k, v]) => ({
+            id: -1000 - i, enabled: true, key: k, value: v, description: "(pre-script)",
+          }));
+          varsForRow = [...overrides, ...csvVars, ...userVars];
+        }
+
+        const body = applyVariables(text.trim(), varsForRow);
+        const customProps: Record<string, string> = {};
+        for (const [k, v] of Object.entries(collectProps())) {
+          customProps[k] = applyVariables(v, varsForRow);
+        }
+        if (RAW_TYPE_CT[rawType] && !customProps["content-type"]) {
+          customProps["content-type"] = RAW_TYPE_CT[rawType]!;
+        }
+
+        try {
+          const result = await invoke<SendResult>("send_message", {
+            address: address.trim(),
+            text: body,
+            fileName: null,
+            fileDataB64: null,
+            customProps,
+            replyTo: null,
+            profile: activeProfile || null,
+          });
+          ok++;
+          totalBytes += new TextEncoder().encode(body).length;
+          if (i < 5 || i === total - 1) {
+            onLog("ok", `CSV row ${i + 1}/${total} → ${result.address}  |  ${result.message_id}`);
+          }
+        } catch (e) {
+          failed++;
+          onLog("err", `CSV row ${i + 1}/${total} failed: ${e}`);
+        }
+        setCsvProgress({ done: i + 1, total, ok, failed });
+      }
+
+      onSent(totalBytes, address.trim(), rawType);
+      const durationMs = Date.now() - startedAt;
+      onLog(failed === 0 ? "ok" : "err",
+        `CSV batch done: ${ok}/${total} sent` +
+        (failed > 0 ? `, ${failed} failed` : "") +
+        ` in ${(durationMs / 1000).toFixed(1)}s`);
+    } catch (e) {
+      const err = e as Error;
+      if (err.name === "AbortError") {
+        onLog("info", `CSV batch cancelled at row ${ok + failed + 1}/${total}`);
+      } else {
+        onLog("err", `CSV batch failed: ${err.message ?? err}`);
+      }
+    } finally {
+      setCsvProgress(null);
+      csvAbortRef.current = null;
+    }
+  }
+
+  function cancelCsvBatch() {
+    csvAbortRef.current?.abort();
+  }
+
   async function doSend() {
     if (!connected)       { onLog("err", "Not connected"); return; }
     if (!address.trim())  { onLog("err", "Queue address is required"); return; }
@@ -718,6 +902,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     { id: "variables",  label: "Variables",  icon: <Braces className="w-3.5 h-3.5" />, badge: enabledUserVarsCount, dot: hasVars && enabledUserVarsCount === 0 },
     { id: "prescript",  label: "Pre-script", icon: <Code2 className="w-3.5 h-3.5" />, dot: preScriptActive },
     { id: "batch",      label: "Batch",      icon: <Repeat2 className="w-3.5 h-3.5" />, dot: batchActive },
+    { id: "csv",        label: "CSV",        icon: <FileSpreadsheet className="w-3.5 h-3.5" />, badge: csvRows.length || undefined, dot: !!csvRows.length },
     { id: "reply",      label: "Reply",      icon: <CornerDownLeft className="w-3.5 h-3.5" />, dot: rrEnabled },
     { id: "templates",  label: "Templates",  icon: <BookMarked className="w-3.5 h-3.5" />, badge: templates.length },
   ];
@@ -1259,6 +1444,233 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                   Click Send and the {batchEnabled ? "first " : ""}message will fire after{" "}
                   <span className="font-mono font-bold">{scheduleDelay}s</span>.
                 </Callout>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* CSV TAB ─────────────────────────────────────────────────────────
+            Bulk-send mode: load a CSV, each row becomes one message. Column
+            values are layered on top of user Variables for that iteration so
+            `{{column_name}}` tokens in Body / Properties resolve from the row. */}
+        {tab === "csv" && (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
+              <span className="text-[11px] text-t-ink4">
+                Load a CSV — each row becomes one message. Column headers turn into <span className="font-mono">{"{{column_name}}"}</span> variables.
+              </span>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+
+              {/* ── File picker / dropzone ──────────────────────────────── */}
+              {!csvFileName ? (
+                <div
+                  onDragOver={e => { e.preventDefault(); setCsvDragOver(true); }}
+                  onDragLeave={() => setCsvDragOver(false)}
+                  onDrop={e => {
+                    e.preventDefault();
+                    setCsvDragOver(false);
+                    const f = e.dataTransfer.files?.[0];
+                    if (f) loadCsvFile(f);
+                  }}
+                  onClick={() => csvFileInputRef.current?.click()}
+                  className={`flex flex-col items-center justify-center gap-2 px-4 py-10 rounded-lg border-2 border-dashed cursor-pointer transition-all ${
+                    csvDragOver
+                      ? "border-blue-500 bg-blue-500/10"
+                      : "border-t-line2 bg-t-card hover:border-blue-500/40 hover:bg-t-hover"
+                  }`}
+                >
+                  <FileSpreadsheet className="w-8 h-8 text-t-ink4" />
+                  <div className="text-[13px] text-t-ink2">Click to choose a CSV file</div>
+                  <div className="text-[11px] text-t-ink5">or drag and drop here</div>
+                  <input
+                    ref={csvFileInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) loadCsvFile(f); e.target.value = ""; }}
+                    className="hidden"
+                  />
+                </div>
+              ) : (
+                <>
+                  {/* Loaded-file summary card */}
+                  <div className="flex items-center gap-2 p-2.5 rounded-lg bg-t-card border border-t-line">
+                    <FileSpreadsheet className="w-4 h-4 text-blue-500 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] text-t-ink truncate">{csvFileName}</div>
+                      <div className="text-[10px] text-t-ink5">
+                        {csvRows.length.toLocaleString()} rows · {csvHeaders.length} columns
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => csvFileInputRef.current?.click()}
+                      className="text-[11px] text-t-ink4 hover:text-blue-500 px-2 py-1 rounded hover:bg-t-hover transition-colors"
+                      title="Replace with another CSV"
+                    >
+                      Replace
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearCsv}
+                      className="p-1 rounded text-t-ink4 hover:text-red-500 hover:bg-t-hover transition-colors"
+                      title="Clear CSV"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      ref={csvFileInputRef}
+                      type="file"
+                      accept=".csv,text/csv"
+                      onChange={e => { const f = e.target.files?.[0]; if (f) loadCsvFile(f); e.target.value = ""; }}
+                      className="hidden"
+                    />
+                  </div>
+
+                  {csvParseError && (
+                    <Callout variant="error">CSV parse error: {csvParseError}</Callout>
+                  )}
+
+                  {csvHeaders.length > 0 && (
+                    <>
+                      {/* Column tokens — clicking copies `{{name}}` into clipboard for paste into Body. */}
+                      <div>
+                        <SectionLabel className="block mb-2">
+                          Column tokens
+                          <span className="text-t-ink5 normal-case font-normal">
+                            {" — paste into Body / Properties; values come from the current row"}
+                          </span>
+                        </SectionLabel>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {csvHeaders.map(h => (
+                            <button
+                              key={h}
+                              type="button"
+                              onClick={() => navigator.clipboard.writeText(`{{${h}}}`).then(
+                                () => onLog("info", `Copied {{${h}}} to clipboard`),
+                                () => {/* clipboard might be denied — silently ignore */}
+                              )}
+                              className="font-mono text-[11px] px-2 py-0.5 rounded border border-t-line2 bg-t-card hover:border-blue-500/40 hover:text-blue-500 hover:bg-blue-500/5 text-t-ink2 transition-colors"
+                              title={`Click to copy {{${h}}} to clipboard`}
+                            >
+                              {`{{${h}}}`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Preview table — first 5 rows so the user can verify what columns look like. */}
+                      <div>
+                        <SectionLabel className="block mb-2">Preview <span className="text-t-ink5 normal-case font-normal">— first {Math.min(5, csvRows.length)} of {csvRows.length} rows</span></SectionLabel>
+                        <div className="bg-t-card border border-t-line rounded-md overflow-auto max-h-48">
+                          <table className="w-full text-[11px] font-mono">
+                            <thead className="sticky top-0 bg-t-panel">
+                              <tr>
+                                <th className="text-left px-2 py-1 text-t-ink5 font-semibold">#</th>
+                                {csvHeaders.map(h => (
+                                  <th key={h} className="text-left px-2 py-1 text-t-ink3 font-semibold whitespace-nowrap">{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {csvRows.slice(0, 5).map((row, i) => (
+                                <tr key={i}
+                                  onClick={() => setCsvDryRunIdx(i)}
+                                  className={`cursor-pointer border-t border-t-line/40 ${
+                                    csvDryRunIdx === i ? "bg-blue-500/10" : "hover:bg-t-hover/50"
+                                  }`}
+                                >
+                                  <td className="px-2 py-1 text-t-ink5">{i + 1}</td>
+                                  {csvHeaders.map((_, j) => (
+                                    <td key={j} className="px-2 py-1 text-t-ink2 truncate max-w-[200px]">
+                                      {row[j] ?? ""}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Dry-run preview — show how the Body resolves for the highlighted row. */}
+                      {mode === "raw" && text.trim() && (
+                        <div>
+                          <SectionLabel className="block mb-2">
+                            Dry-run preview
+                            <span className="text-t-ink5 normal-case font-normal"> — body for row {csvDryRunIdx + 1} after substitution</span>
+                          </SectionLabel>
+                          <pre className="bg-t-card border border-t-line rounded-md p-2.5 text-[11px] font-mono text-t-ink2 max-h-40 overflow-auto whitespace-pre-wrap">
+                            {resolveBodyForCsvRow(csvDryRunIdx) || "(empty)"}
+                          </pre>
+                        </div>
+                      )}
+
+                      {/* Per-row delay control */}
+                      <div>
+                        <SectionLabel className="block mb-2">Send parameters</SectionLabel>
+                        <div className="bg-t-card border border-t-line rounded-lg p-3">
+                          <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1.5">
+                            Delay between rows
+                            <span className="text-t-ink5 normal-case font-normal"> — milliseconds, 0 = as fast as possible</span>
+                          </label>
+                          <input type="number" min="0" value={csvDelay} onChange={e => setCsvDelay(e.target.value)}
+                            className={`${INPUT} w-32`} />
+                        </div>
+                      </div>
+
+                      {/* Bulk-send action — replaces the regular Send for this batch. */}
+                      <div className="flex items-center gap-2 pt-1">
+                        {!csvProgress ? (
+                          <button
+                            type="button"
+                            onClick={sendCsvBatch}
+                            disabled={!connected || !text.trim() || mode !== "raw" || !address.trim()}
+                            className="flex items-center gap-1.5 px-4 py-1.5 rounded-md text-[13px] font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            Send {csvRows.length.toLocaleString()} message{csvRows.length !== 1 ? "s" : ""}
+                          </button>
+                        ) : (
+                          <>
+                            <div className="flex-1 flex items-center gap-2">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-500 shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 text-[12px]">
+                                  <span className="text-t-ink2 font-mono">
+                                    {csvProgress.done}/{csvProgress.total}
+                                  </span>
+                                  <span className="text-green-500 text-[11px] font-mono">{csvProgress.ok} ok</span>
+                                  {csvProgress.failed > 0 && (
+                                    <span className="text-red-500 text-[11px] font-mono">{csvProgress.failed} fail</span>
+                                  )}
+                                </div>
+                                <div className="mt-1 h-1.5 rounded-full bg-t-line overflow-hidden">
+                                  <div
+                                    className="h-full bg-blue-500 transition-all"
+                                    style={{ width: `${(csvProgress.done / Math.max(1, csvProgress.total)) * 100}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={cancelCsvBatch}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium bg-red-500/10 border border-red-500/30 text-red-500 hover:bg-red-500/20 transition-colors"
+                            >
+                              <Square className="w-3 h-3" /> Cancel
+                            </button>
+                          </>
+                        )}
+                      </div>
+
+                      <Callout variant="info">
+                        Pre-script runs once per row with column values available via <code>ctx.get("col_name")</code>.
+                        Schema validation is skipped in CSV mode for throughput.
+                      </Callout>
+                    </>
+                  )}
+                </>
               )}
             </div>
           </div>

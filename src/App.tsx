@@ -102,6 +102,7 @@ export default function App() {
     connectTimeoutSecs: "10",
     tlsSkipVerify: false,
     saslAnonymous: false,
+    workspace: "Default",
   });
 
   // Track previous view to support Cmd+L toggle
@@ -239,6 +240,7 @@ export default function App() {
       connectTimeoutSecs: p.connect_timeout_secs !== undefined ? String(p.connect_timeout_secs) : "10",
       tlsSkipVerify:      p.tls_skip_verify ?? false,
       saslAnonymous:      p.sasl_anonymous ?? false,
+      workspace:          (p.workspace ?? "").trim() || "Default",
     });
     setActiveProfile(p.name);
   }
@@ -368,20 +370,41 @@ export default function App() {
               </button>
             )}
           >
-            <DropdownSection title="Broker profile">
-              {profiles.length === 0
-                ? <p className="text-[11px] text-t-ink5 text-center py-3">No saved profiles</p>
-                : profiles.map(p => (
-                    <DropdownItem
-                      key={p.name}
-                      active={p.name === activeProfile}
-                      onClick={() => applyProfile(p)}
-                      trailing={`${p.host}:${p.port}${p.use_tls ? " · TLS" : ""}`}
-                    >
-                      {p.name}
-                    </DropdownItem>
-                  ))}
-            </DropdownSection>
+            {profiles.length === 0 ? (
+              <DropdownSection title="Broker profile">
+                <p className="text-[11px] text-t-ink5 text-center py-3">No saved profiles</p>
+              </DropdownSection>
+            ) : (
+              // Group profiles by workspace. Stable workspace order: alphabetical,
+              // but "Default" always last so user-named groups float to the top.
+              (() => {
+                const groups = new Map<string, Profile[]>();
+                for (const p of profiles) {
+                  const ws = (p.workspace ?? "").trim() || "Default";
+                  if (!groups.has(ws)) groups.set(ws, []);
+                  groups.get(ws)!.push(p);
+                }
+                const ordered = [...groups.entries()].sort(([a], [b]) => {
+                  if (a === "Default") return 1;
+                  if (b === "Default") return -1;
+                  return a.localeCompare(b);
+                });
+                return ordered.map(([ws, items]) => (
+                  <DropdownSection key={ws} title={ws}>
+                    {items.map(p => (
+                      <DropdownItem
+                        key={p.name}
+                        active={p.name === activeProfile}
+                        onClick={() => applyProfile(p)}
+                        trailing={`${p.host}:${p.port}${p.use_tls ? " · TLS" : ""}`}
+                      >
+                        {p.name}
+                      </DropdownItem>
+                    ))}
+                  </DropdownSection>
+                ));
+              })()
+            )}
             <DropdownFooter>
               <button
                 onClick={() => changeView("connection")}
@@ -725,13 +748,17 @@ function buildPaletteActions(opts: {
     });
   }
 
-  // ── Profiles ──
+  // ── Profiles — categorise by workspace so the palette mirrors the
+  //    grouped header dropdown. "Default" workspace is folded into a plain
+  //    "Profiles" header for the common case where no grouping is in use.
   for (const p of opts.profiles) {
+    const ws = (p.workspace ?? "").trim() || "Default";
+    const cat = ws === "Default" ? "Profiles" : `Profiles · ${ws}`;
     out.push({
       id:      `profile:${p.name}`,
       label:   `Switch to profile: ${p.name}`,
       hint:    `${p.host}:${p.port}${p.use_tls ? " · TLS" : ""}`,
-      category: "Profiles",
+      category: cat,
       icon:    <User className="w-3.5 h-3.5" />,
       disabled: p.name === opts.activeProfile,
       run:     () => opts.applyProfile(p),

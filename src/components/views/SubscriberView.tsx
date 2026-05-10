@@ -5,7 +5,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import {
   Play, Square, Trash2, Inbox, Search, X, Loader2, Pause, CornerUpLeft,
   Tag, MessageSquare, Download, Palette, Plus, Edit3,
-  Database, GitCompare, ChevronDown,
+  Database, GitCompare, ChevronDown, Filter,
 } from "lucide-react";
 import CopyButton from "../CopyButton";
 import { ReceivedMessage, SubEvent } from "../../types";
@@ -117,12 +117,21 @@ function ruleHaystack(msg: ReceivedMessage): string {
 interface QueueState {
   queue: string;
   reconnecting: boolean;
+  /** JMS selector this subscription was started with (if any). Drives a
+   *  small filter-chip on the active-subscription pill. */
+  selector?: string;
 }
 
 // ── component ────────────────────────────────────────────────────────────────
 
 export default function SubscriberView({ connected, defaultAddress, pendingAddress, onLog, onMessageReceived, onReply }: Props) {
   const [picker,       setPicker]       = useState(defaultAddress);
+  /** JMS-style broker-side selector, e.g. `priority > 5 AND type = 'order'`.
+   *  Empty = no filter. Sent to start_subscriber as the `selector` arg.
+   *  Persists per-subscription so the chips can show whether a queue is
+   *  filtered. */
+  const [selector,     setSelector]     = useState("");
+  const [showSelector, setShowSelector] = useState(false);
   const [paused,       setPaused]       = useState(false);
   const [messages,     setMessages]     = useState<ReceivedMessage[]>([]);
   const [filter,       setFilter]       = useState("");
@@ -325,8 +334,9 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
     if (!addr)             { onLog("err", "Queue address is required"); return; }
     if (queues.some(q => q.queue === addr)) { onLog("err", `Already subscribed to '${addr}'`); return; }
     try {
-      await invoke("start_subscriber", { address: addr });
-      setQueues(prev => [...prev, { queue: addr, reconnecting: false }]);
+      const sel = selector.trim();
+      await invoke("start_subscriber", { address: addr, selector: sel || null });
+      setQueues(prev => [...prev, { queue: addr, reconnecting: false, selector: sel || undefined }]);
       if (sessionStart === null) {
         setSessionStart(Date.now());
         setSessionBytes(0);
@@ -518,7 +528,53 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
       <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
         <SectionLabel className="shrink-0">From</SectionLabel>
         <QueuePicker value={picker} onChange={setPicker} connected={connected} disabled={false} showSave className="flex-1" />
+        <button
+          type="button"
+          onClick={() => setShowSelector(s => !s)}
+          className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium border transition-colors ${
+            selector.trim()
+              ? "border-blue-500/40 text-blue-500 bg-blue-500/10 hover:bg-blue-500/20"
+              : showSelector
+                ? "border-t-line2 text-t-ink bg-t-card"
+                : "border-t-line text-t-ink4 hover:text-t-ink hover:bg-t-hover"
+          }`}
+          title={selector.trim() ? `Selector active: ${selector}` : "Add a JMS-style broker-side selector"}
+        >
+          <Filter className="w-3 h-3" />
+          Selector
+          {selector.trim() && <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
+        </button>
       </div>
+
+      {/* ─── SELECTOR INPUT ROW (collapsible) ─── */}
+      {showSelector && (
+        <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel/60 flex items-start gap-2">
+          <SectionLabel className="shrink-0 mt-1.5">Where</SectionLabel>
+          <div className="flex-1 min-w-0">
+            <input
+              value={selector}
+              onChange={e => setSelector(e.target.value)}
+              placeholder="priority > 5 AND application_property:type = 'order'"
+              spellCheck={false}
+              className="w-full font-mono text-[12px] bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-t-ink outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5"
+            />
+            <p className="text-[10px] text-t-ink5 mt-1">
+              JMS-style selector applied broker-side via <span className="font-mono">apache.org:selector-filter:string</span>.
+              Supported on Artemis / ActiveMQ / Qpid. Empty = receive everything.
+            </p>
+          </div>
+          {selector && (
+            <button
+              type="button"
+              onClick={() => setSelector("")}
+              className="shrink-0 mt-1 p-1 rounded text-t-ink4 hover:text-red-500 hover:bg-t-hover transition-colors"
+              title="Clear selector"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ─── ACTIVE SUBSCRIPTIONS BAR ─── */}
       {listening && (
@@ -549,12 +605,18 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
                     ? "bg-amber-500/10 border-amber-500/30 text-amber-500"
                     : "bg-t-card border-t-line text-t-ink2"
                 }`}
-                title={q.reconnecting ? `Reconnecting to '${q.queue}'…` : `Listening on '${q.queue}'`}
+                title={
+                  (q.reconnecting ? `Reconnecting to '${q.queue}'…` : `Listening on '${q.queue}'`) +
+                  (q.selector ? ` · selector: ${q.selector}` : "")
+                }
               >
                 {q.reconnecting
                   ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
                   : <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
                 {q.queue}
+                {q.selector && (
+                  <Filter className="w-2.5 h-2.5 text-blue-500" />
+                )}
                 <button
                   onClick={() => removeSubscription(q.queue)}
                   className="opacity-50 group-hover:opacity-100 hover:text-red-500 transition-opacity"

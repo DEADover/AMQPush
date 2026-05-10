@@ -13,6 +13,11 @@ export interface Profile {
   connect_timeout_secs?: number;
   tls_skip_verify?: boolean;
   sasl_anonymous?: boolean;
+
+  /** User-defined grouping label (e.g. "Dev" / "Staging" / "Prod"). Drives
+   *  section headers in the header profile picker and Cmd+K palette.
+   *  Empty / missing falls back to "Default". */
+  workspace?: string;
 }
 
 export interface SendResult {

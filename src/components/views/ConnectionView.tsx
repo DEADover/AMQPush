@@ -25,6 +25,9 @@ export interface ConnForm {
   connectTimeoutSecs: string;     // 0 = no timeout
   tlsSkipVerify: boolean;
   saslAnonymous: boolean;
+
+  /** Workspace / grouping label. Empty resolves to "Default". */
+  workspace: string;
 }
 
 interface Props {
@@ -58,6 +61,7 @@ const DEFAULTS: ConnForm = {
   connectTimeoutSecs: "10",
   tlsSkipVerify: false,
   saslAnonymous: false,
+  workspace: "Default",
 };
 
 // Heuristic: which log entries are "connection-related" — to filter the activity panel
@@ -74,7 +78,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
 
   // Form value shorthands — pull from props
   const { host, port, username, password, queue, useTls } = form;
-  const { containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous } = form;
+  const { containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace } = form;
   const setHost     = (v: string) => setForm(f => ({ ...f, host: v }));
   const setPort     = (v: string) => setForm(f => ({ ...f, port: v }));
   const setUsername = (v: string) => setForm(f => ({ ...f, username: v }));
@@ -86,6 +90,19 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
   const setConnectTimeoutSecs = (v: string)  => setForm(f => ({ ...f, connectTimeoutSecs: v }));
   const setTlsSkipVerify      = (v: boolean) => setForm(f => ({ ...f, tlsSkipVerify: v }));
   const setSaslAnonymous      = (v: boolean) => setForm(f => ({ ...f, saslAnonymous: v }));
+  const setWorkspace          = (v: string)  => setForm(f => ({ ...f, workspace: v }));
+
+  // Existing workspace labels (deduped) — used as datalist suggestions in the
+  // workspace input. Always includes "Default" so the user has at least one
+  // pre-filled choice on a fresh install.
+  const workspaceSuggestions = useMemo(() => {
+    const set = new Set<string>(["Default"]);
+    for (const p of profiles) {
+      const ws = (p.workspace ?? "").trim();
+      if (ws) set.add(ws);
+    }
+    return [...set].sort((a, b) => a === "Default" ? 1 : b === "Default" ? -1 : a.localeCompare(b));
+  }, [profiles]);
 
   const [tab, setTab] = useState<MainTab>("main");
   // Detect if any "Advanced" field has a non-default value — show a dot on the Advanced tab
@@ -128,6 +145,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       connectTimeoutSecs: p.connect_timeout_secs !== undefined ? String(p.connect_timeout_secs) : "10",
       tlsSkipVerify:      p.tls_skip_verify ?? false,
       saslAnonymous:      p.sasl_anonymous ?? false,
+      workspace:          (p.workspace ?? "").trim() || "Default",
     });
   }
 
@@ -156,9 +174,10 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
         || (loaded.heartbeat_secs ?? 0) !== (Number(heartbeatSecs) || 0)
         || (loaded.connect_timeout_secs ?? 10) !== (Number(connectTimeoutSecs) || 0)
         || (loaded.tls_skip_verify ?? false) !== tlsSkipVerify
-        || (loaded.sasl_anonymous ?? false) !== saslAnonymous;
+        || (loaded.sasl_anonymous ?? false) !== saslAnonymous
+        || ((loaded.workspace ?? "").trim() || "Default") !== (workspace.trim() || "Default");
   }, [loaded, host, port, username, password, queue, useTls,
-      containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous]);
+      containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace]);
 
   function buildProfile(name: string): Profile {
     return {
@@ -174,6 +193,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       connect_timeout_secs: Number(connectTimeoutSecs) || 0,
       tls_skip_verify: tlsSkipVerify,
       sasl_anonymous: saslAnonymous,
+      workspace: workspace.trim() || "Default",
     };
   }
 
@@ -460,6 +480,26 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
           <div className="grid grid-cols-2 gap-3">
             <div><label className={LABEL}>Host <span className="text-red-500">*</span></label><input value={host} onChange={e => setHost(e.target.value)} placeholder="127.0.0.1" className={INPUT} /></div>
             <div><label className={LABEL}>Port <span className="text-red-500">*</span></label><input value={port} onChange={e => setPort(e.target.value)} placeholder="5672" className={INPUT} /></div>
+          </div>
+          {/* Workspace — groups this profile under a named bucket in the
+              header picker and Cmd+K palette. Free-form text with autocomplete
+              from existing workspaces; "Default" is the canonical fallback. */}
+          <div className="mt-3">
+            <label className={LABEL} htmlFor="profile-workspace">Workspace</label>
+            <input
+              id="profile-workspace"
+              list="amqpush-workspaces"
+              value={workspace}
+              onChange={e => setWorkspace(e.target.value)}
+              placeholder="Default"
+              className={INPUT}
+            />
+            <datalist id="amqpush-workspaces">
+              {workspaceSuggestions.map(w => <option key={w} value={w} />)}
+            </datalist>
+            <p className="text-[10px] text-t-ink5 mt-1">
+              Profiles are grouped by workspace in the header picker and Cmd+K palette.
+            </p>
           </div>
         </div>
 

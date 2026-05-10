@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Radar, RotateCcw, Inbox, Send, X, Loader2, Eye,
-  Tag, MessageSquare, Search, Trash2, AlertTriangle,
+  Tag, MessageSquare, Search, Trash2, AlertTriangle, CornerUpLeft, ShieldAlert,
 } from "lucide-react";
 import CollapsibleSection from "../CollapsibleSection";
 import PropsList from "../PropsList";
@@ -59,6 +59,68 @@ const QUEUE_POLL_INTERVAL_MS = 2500;
 type SortKey = "name" | "messages" | "consumers" | "type";
 type SortDir = "asc" | "desc";
 
+// ── DLQ detection & requeue helpers ──────────────────────────────────────────
+//
+// Heuristic queue-name match — we treat anything that looks like a dead-letter
+// or expiry queue as a DLQ for the purposes of showing the requeue UI. The
+// detection is liberal on purpose; the worst case is that the user sees a
+// "Requeue" button on a non-DLQ queue and the requeue still works (it just
+// republishes to wherever `_AMQ_ORIG_ADDRESS` points, or no-ops if absent).
+function isDlqQueueName(name: string): boolean {
+  const n = name.toLowerCase();
+  return (
+    n === "dlq" ||
+    n === "expiryqueue" ||
+    n === "activemq.dlq" ||
+    n.endsWith(".dlq") ||
+    n.endsWith("_dlq") ||
+    n.includes("dlq") ||
+    n.includes("dead")
+  );
+}
+
+/** Property keys Artemis / Classic / Solace stamp on DLQ messages with the
+ *  original delivery target. We try them in priority order. */
+const DLQ_ORIGIN_KEYS = [
+  "_AMQ_ORIG_ADDRESS",     // Artemis (most common)
+  "_AMQ_ORIG_QUEUE",       // Artemis fallback (queue-level)
+  "originalDestination",   // ActiveMQ Classic
+  "JMSXOriginalDestination",
+];
+
+/** Internal app properties to strip when republishing — otherwise the broker
+ *  may immediately re-DLQ the message (it sees the original-address marker
+ *  and treats the requeue as another failed delivery). */
+const DLQ_STRIP_KEYS = new Set([
+  ..._dlqStripBaseKeys(),
+]);
+
+function _dlqStripBaseKeys(): string[] {
+  return [
+    "_AMQ_ORIG_ADDRESS",
+    "_AMQ_ORIG_QUEUE",
+    "_AMQ_ORIG_REASON",
+    "_AMQ_ORIG_BINDINGS",
+    "_AMQ_DLA_HISTORY",
+    "originalDestination",
+    "JMSXOriginalDestination",
+    // _AMQ_ROUTING_TYPE will be re-added by the backend on send, so strip
+    // here too to avoid stale ANYCAST/MULTICAST hints from the dropped
+    // delivery.
+    "_AMQ_ROUTING_TYPE",
+  ];
+}
+
+/** Return the original destination from a peeked message's app properties,
+ *  or `null` if none of the known keys is present / non-empty. */
+function originalDestination(props: Record<string, string>): string | null {
+  for (const k of DLQ_ORIGIN_KEYS) {
+    const v = props[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+}
+
 export default function BrowserView({ connected, visible, onLog, onPublishTo, onSubscribeTo }: Props) {
   const [queues,    setQueues]    = useState<BrokerQueue[]>([]);
   const [loading,   setLoading]   = useState(false);
@@ -81,6 +143,8 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
   /** Set to a queue address while a Purge-confirm modal is open for it. */
   const [purgeConfirm,  setPurgeConfirm]  = useState<string | null>(null);
   const [purging,       setPurging]       = useState(false);
+  /** Requeue progress — `null` when idle, `{done, total}` while running. */
+  const [requeueProgress, setRequeueProgress] = useState<{ done: number; total: number } | null>(null);
 
   // ─── Auto-refresh queue list (cheap call: only metrics, no message bodies) ──
   useEffect(() => {
@@ -168,6 +232,65 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
     } finally {
       setPurging(false);
     }
+  }
+
+  /**
+   * Republish one or more peeked DLQ messages to their original destinations.
+   * Each message keeps its body text and (most of) its application properties
+   * — internal markers like `_AMQ_ORIG_ADDRESS` are stripped so the broker
+   * doesn't immediately re-DLQ the requeued copy.
+   *
+   * Messages without an original-destination property are skipped (we can't
+   * know where to send them). The caller is responsible for purging the DLQ
+   * separately if they want to clean up — we don't delete from DLQ here
+   * because the broker's per-message remove API would need the broker-side
+   * message id, which AMQP peek doesn't expose.
+   */
+  async function requeueMessages(msgs: PeekedMessage[]): Promise<void> {
+    const targets = msgs
+      .map(m => ({ msg: m, origin: originalDestination(m.application_properties) }))
+      .filter((x): x is { msg: PeekedMessage; origin: string } => !!x.origin);
+
+    if (targets.length === 0) {
+      onLog("err", "No messages have an original-destination property to requeue to.");
+      return;
+    }
+
+    setRequeueProgress({ done: 0, total: targets.length });
+    let ok = 0;
+    let failed = 0;
+
+    for (let i = 0; i < targets.length; i++) {
+      const { msg, origin } = targets[i];
+      // Strip DLQ-internal markers; keep the rest of the original app props.
+      const customProps: Record<string, string> = {};
+      for (const [k, v] of Object.entries(msg.application_properties)) {
+        if (!DLQ_STRIP_KEYS.has(k)) customProps[k] = v;
+      }
+      try {
+        await invoke("send_message", {
+          address: origin,
+          text: msg.body_text ?? "",
+          fileName: null,
+          fileDataB64: null,
+          customProps,
+          replyTo: msg.reply_to ?? null,
+          profile: null,
+        });
+        ok++;
+      } catch (e) {
+        failed++;
+        onLog("err", `Requeue → ${origin} failed: ${e}`);
+      }
+      setRequeueProgress({ done: i + 1, total: targets.length });
+    }
+
+    setRequeueProgress(null);
+    const skipped = msgs.length - targets.length;
+    onLog(failed === 0 ? "ok" : "err",
+      `Requeued ${ok}/${targets.length} message${targets.length !== 1 ? "s" : ""}` +
+      (failed > 0 ? ` · ${failed} failed` : "") +
+      (skipped > 0 ? ` · ${skipped} skipped (no origin)` : ""));
   }
 
   function toggleSort(key: SortKey) {
@@ -369,6 +492,18 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors">
                   <RotateCcw className={`w-3 h-3 ${peekLoading ? "animate-spin" : ""}`} /> Refresh
                 </button>
+                {isDlqQueueName(selectedQueue) && messages.length > 0 && (
+                  <button
+                    onClick={() => requeueMessages(messages)}
+                    disabled={!!requeueProgress || peekLoading}
+                    title={`Republish all ${messages.length} peeked message${messages.length !== 1 ? "s" : ""} to their original destinations`}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-blue-500 bg-blue-500/10 hover:bg-blue-500/20 transition-colors disabled:opacity-40"
+                  >
+                    {requeueProgress
+                      ? <><Loader2 className="w-3 h-3 animate-spin" /> Requeue {requeueProgress.done}/{requeueProgress.total}</>
+                      : <><CornerUpLeft className="w-3 h-3" /> Requeue all</>}
+                  </button>
+                )}
                 <button
                   onClick={() => setPurgeConfirm(selectedQueue)}
                   disabled={messages.length === 0 || peekLoading}
@@ -386,6 +521,23 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                 </button>
               </div>
             </div>
+
+            {/* DLQ banner — shown for queues whose names match common dead-letter
+                patterns. Surfaces the requeue feature without forcing the user
+                to dig through Help. */}
+            {isDlqQueueName(selectedQueue) && (
+              <div className="shrink-0 px-3 py-2 border-b border-t-line bg-amber-500/5 flex items-start gap-2 text-[11px]">
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                <div className="text-t-ink2 leading-relaxed">
+                  <span className="text-amber-500 font-medium">Dead-letter queue.</span>{" "}
+                  Messages here usually carry an original-destination property
+                  (<span className="font-mono text-[10px]">_AMQ_ORIG_ADDRESS</span>{" "}
+                  on Artemis, <span className="font-mono text-[10px]">originalDestination</span>{" "}
+                  on Classic). <b>Requeue all</b> republishes each message to
+                  its origin so consumers get another delivery attempt.
+                </div>
+              </div>
+            )}
 
             {peekLoading ? (
               <EmptyState icon={<Loader2 className="w-8 h-8 animate-spin" />} title="Peeking messages…" subtitle="Reading from queue without consuming" />
@@ -436,7 +588,13 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                 {/* Selected message details */}
                 {openMessageIdx !== null && messages[openMessageIdx] && (
                   <div className="shrink-0 max-h-[55%] overflow-auto p-3 bg-t-card/40 border-t border-t-line">
-                    <MessageDetails msg={messages[openMessageIdx]} idx={openMessageIdx} onLog={onLog} />
+                    <MessageDetails
+                      msg={messages[openMessageIdx]}
+                      idx={openMessageIdx}
+                      onLog={onLog}
+                      onRequeue={isDlqQueueName(selectedQueue) ? () => requeueMessages([messages[openMessageIdx]!]) : undefined}
+                      requeueDisabled={!!requeueProgress}
+                    />
                   </div>
                 )}
               </>
@@ -541,7 +699,15 @@ function IconBtn({ title, onClick, colorClass, children }: {
   );
 }
 
-function MessageDetails({ msg, idx, onLog }: { msg: PeekedMessage; idx: number; onLog: (k: "info" | "ok" | "err", t: string) => void }) {
+function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
+  msg: PeekedMessage;
+  idx: number;
+  onLog: (k: "info" | "ok" | "err", t: string) => void;
+  /** When set, render a "Requeue this message" button — passed in only for
+   *  DLQ queues, so non-DLQ peeks don't grow this UI. */
+  onRequeue?: () => void;
+  requeueDisabled?: boolean;
+}) {
   const [bodyOpen,  setBodyOpen]  = useState(true);
   const [propsOpen, setPropsOpen] = useState(true);
   const [appOpen,   setAppOpen]   = useState(true);
@@ -579,6 +745,25 @@ function MessageDetails({ msg, idx, onLog }: { msg: PeekedMessage; idx: number; 
         )}
         {msg.priority !== null && msg.priority !== 4 && <span className="text-t-ink4">P{msg.priority}</span>}
         {msg.durable && <span className="text-blue-500">durable</span>}
+        {onRequeue && (() => {
+          // Discoverable per-message Requeue: shown only on DLQ queues, and
+          // only when this message has an origin we can read. Disabled while
+          // a bulk-requeue pass is in flight to avoid clobbering the progress
+          // counter.
+          const origin = originalDestination(msg.application_properties);
+          if (!origin) return null;
+          return (
+            <button
+              type="button"
+              onClick={onRequeue}
+              disabled={requeueDisabled}
+              title={`Republish this message to ${origin}`}
+              className="ml-auto flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:text-blue-400 disabled:opacity-40 transition-colors"
+            >
+              <CornerUpLeft className="w-3 h-3" /> Requeue → <span className="font-mono">{origin}</span>
+            </button>
+          );
+        })()}
       </div>
 
       <CollapsibleSection title="Properties" icon={<Tag className="w-3 h-3" />} open={propsOpen} onToggle={() => setPropsOpen(o => !o)}>

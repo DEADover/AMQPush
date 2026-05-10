@@ -28,9 +28,16 @@ pub struct Profile {
     pub tls_skip_verify: bool,           // self-signed certs (insecure)
     #[serde(default)]
     pub sasl_anonymous: bool,            // force ANONYMOUS even with creds in form
+
+    /// User-defined grouping label, e.g. "Dev" / "Staging" / "Prod" or per
+    /// service / project. Profiles are sorted under their workspace in the
+    /// global picker and the Cmd+K palette. Empty / missing → "Default".
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
 }
 
 fn default_connect_timeout() -> u32 { 10 }
+fn default_workspace() -> String { "Default".into() }
 
 impl Default for Profile {
     fn default() -> Self {
@@ -47,6 +54,7 @@ impl Default for Profile {
             connect_timeout_secs: 10,
             tls_skip_verify: false,
             sasl_anonymous: false,
+            workspace: default_workspace(),
         }
     }
 }

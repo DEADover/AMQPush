@@ -207,12 +207,17 @@ async fn send_message(
 
 // ── subscriber ────────────────────────────────────────────────────────────────
 
+/// Start a subscriber on `address`. `selector` is an optional JMS-style
+/// filter expression (e.g. `priority > 5 AND type = 'order'`); empty or
+/// `None` = no filter, broker delivers everything.
 #[tauri::command]
 async fn start_subscriber(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     address: String,
+    selector: Option<String>,
 ) -> Result<(), String> {
+    let selector = selector.unwrap_or_default();
     let addr = address.trim().to_string();
     if addr.is_empty() {
         return Err("Queue address is required".into());
@@ -243,7 +248,7 @@ async fn start_subscriber(
     }
 
     let handle =
-        subscriber::start(&host, port, addr.clone(), &username, &password, use_tls, tls_skip_verify, app).await?;
+        subscriber::start(&host, port, addr.clone(), &username, &password, use_tls, tls_skip_verify, selector, app).await?;
 
     let mut subs = state.subs.lock().await;
     subs.insert(addr, handle);
