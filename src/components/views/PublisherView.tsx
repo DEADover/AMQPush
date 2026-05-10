@@ -982,7 +982,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           <div className="flex-1 min-h-0 flex flex-col">
 
             {/* Body sub-toolbar — segmented mode picker + raw subtype dropdown + validation/format */}
-            <div className="shrink-0 px-3 py-1.5 flex items-center gap-3 border-b border-t-line bg-t-panel">
+            <div className="shrink-0 h-9 px-3 flex items-center gap-3 border-b border-t-line bg-t-panel">
 
               {/* Body mode: none / raw / binary */}
               <SegmentedControl<BodyMode>
@@ -1170,7 +1170,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           <div className="flex-1 min-h-0 flex flex-col">
 
             {/* Sub-toolbar */}
-            <div className="shrink-0 px-3 py-1 flex items-center gap-2 border-b border-t-line bg-t-panel">
+            <div className="shrink-0 h-9 px-3 flex items-center gap-2 border-b border-t-line bg-t-panel">
               <span className="text-[11px] text-t-ink4">Custom AMQP message properties — sent as application-properties.</span>
               <button onClick={addProp}
                 className="ml-auto px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors flex items-center gap-1">
@@ -1235,7 +1235,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           <div className="flex-1 min-h-0 flex flex-col">
 
             {/* Sub-toolbar: caption + Presets dropdown + Add */}
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
+            <div className="shrink-0 h-9 px-3 border-b border-t-line bg-t-panel flex items-center gap-2">
               <span className="text-[11px] text-t-ink4">
                 Use <code className="text-blue-500 font-mono">{`{{key}}`}</code> in body — replaced on each send.
               </span>
@@ -1335,7 +1335,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         {/* PRE-SCRIPT TAB */}
         {tab === "prescript" && (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
+            <div className="shrink-0 h-9 px-3 flex items-center border-b border-t-line bg-t-panel">
               <span className="text-[11px] text-t-ink4">
                 JavaScript that runs before each send. Set variables via{" "}
                 <code className="text-blue-500 font-mono">ctx.set(name, value)</code>{" "}
@@ -1382,7 +1382,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         {/* BATCH TAB */}
         {tab === "batch" && (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
+            <div className="shrink-0 h-9 px-3 flex items-center border-b border-t-line bg-t-panel">
               <span className="text-[11px] text-t-ink4">Send the same message multiple times with optional delay.</span>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
@@ -1468,7 +1468,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             `{{column_name}}` tokens in Body / Properties resolve from the row. */}
         {tab === "csv" && (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
+            <div className="shrink-0 h-9 px-3 flex items-center border-b border-t-line bg-t-panel">
               <span className="text-[11px] text-t-ink4">
                 Load a CSV — each row becomes one message. Column headers turn into <span className="font-mono">{"{{column_name}}"}</span> variables.
               </span>
@@ -1692,7 +1692,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         {/* REPLY TAB */}
         {tab === "reply" && (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel">
+            <div className="shrink-0 h-9 px-3 flex items-center border-b border-t-line bg-t-panel">
               <span className="text-[11px] text-t-ink4">Wait for a reply on a separate queue after sending.</span>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
@@ -1774,7 +1774,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         {/* TEMPLATES TAB */}
         {tab === "templates" && (
           <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">
+            <div className="shrink-0 h-9 px-3 border-b border-t-line bg-t-panel flex items-center gap-2">
               <span className="text-[11px] text-t-ink4">Saved message templates</span>
               <div className="ml-auto">
                 {savingTpl ? (
