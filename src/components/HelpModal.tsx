@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, ReactNode } from "react";
 import {
   X, Search, BookOpen, Plug, Send, Inbox, ListTree, History as HistoryIcon,
   BarChart3, Terminal, Keyboard, Sparkles, ShieldCheck, Braces, Code2,
-  Repeat2, CornerDownLeft, BookMarked, Database,
+  Repeat2, CornerDownLeft, BookMarked, Database, FileSpreadsheet, Filter,
   AlertTriangle, Lightbulb,
 } from "lucide-react";
 
@@ -120,7 +120,7 @@ const SECTIONS: HelpSection[] = [
     id: "connection",
     title: "Connection",
     icon: <Plug className="w-3.5 h-3.5" />,
-    searchText: "connection profile host port username password tls ssl heartbeat container id sasl anonymous certificate verify advanced",
+    searchText: "connection profile host port username password tls ssl heartbeat container id sasl anonymous certificate verify advanced workspace group dev staging prod",
     content: (
       <>
         <H><Plug className="w-4 h-4 text-blue-500" />Connection &amp; profiles</H>
@@ -136,6 +136,7 @@ const SECTIONS: HelpSection[] = [
         <Row label="Username / Password">SASL PLAIN credentials. Leave blank with <i>Anonymous</i> on.</Row>
         <Row label="Default queue">Optional. Pre-fills the destination on the Send view.</Row>
         <Row label="Use TLS">Negotiates AMQPS. Pair with <i>Skip cert verify</i> for self-signed dev brokers.</Row>
+        <Row label="Workspace">Free-form group label (e.g. <Code>Dev</Code> / <Code>Staging</Code> / <Code>Prod</Code>). Drives sectioned headers in the global profile picker and Cmd+K palette categories. Empty / missing falls back to <Code>Default</Code>. The input has datalist autocomplete from existing workspaces.</Row>
         <H3>Advanced</H3>
         <Row label="Container ID">AMQP container identifier — defaults to a random UUID. Set this when the broker authorizes by container.</Row>
         <Row label="Heartbeat">Idle-timeout for keep-alive frames, seconds. <Code>0</Code> disables.</Row>
@@ -161,7 +162,7 @@ const SECTIONS: HelpSection[] = [
         <H><Send className="w-4 h-4 text-blue-500" />Send (publisher)</H>
         <P>
           The Send view is organized as tabs. Body and Properties are the essentials; everything
-          else (Variables, Pre-script, Batch, Reply, Templates) is opt-in.
+          else (Variables, Pre-script, Batch, CSV, Reply, Templates) is opt-in.
         </P>
         <H3>Body</H3>
         <UL>
@@ -197,7 +198,7 @@ const SECTIONS: HelpSection[] = [
     id: "variables",
     title: "Variables",
     icon: <Braces className="w-3.5 h-3.5" />,
-    searchText: "variables substitution placeholders user variables built-in uuid timestamp now date prebuilt template tokens curly braces faker",
+    searchText: "variables substitution placeholders user variables built-in uuid timestamp now date prebuilt template tokens curly braces faker email name address credit card iban lorem ipsum phone username password",
     content: (
       <>
         <H><Braces className="w-4 h-4 text-blue-500" />Variables</H>
@@ -225,6 +226,26 @@ const SECTIONS: HelpSection[] = [
         <Note>
           Tokens work fine inside JSON. AMQPush replaces them <i>after</i> validating the structural
           template — so <Code>{"\"id\": \"{{uuid}}\""}</Code> stays valid JSON during validation.
+        </Note>
+
+        <H3>Faker tokens (realistic test data)</H3>
+        <P>
+          The <Code>{"{{faker.<path>}}"}</Code> namespace wraps the
+          {" "}<Code>@faker-js/faker</Code> library so you can fill bodies with realistic-looking
+          dummy data. All tokens auto-complete from the editor like the built-ins.
+        </P>
+        <UL>
+          <Li><b>People</b> — <Code>{"{{faker.firstName}}"}</Code>, <Code>{"{{faker.lastName}}"}</Code>, <Code>{"{{faker.fullName}}"}</Code>, <Code>{"{{faker.jobTitle}}"}</Code>, <Code>{"{{faker.gender}}"}</Code></Li>
+          <Li><b>Internet / contact</b> — <Code>{"{{faker.email}}"}</Code>, <Code>{"{{faker.username}}"}</Code>, <Code>{"{{faker.url}}"}</Code>, <Code>{"{{faker.domain}}"}</Code>, <Code>{"{{faker.phone}}"}</Code>, <Code>{"{{faker.ip}}"}</Code>, <Code>{"{{faker.ipv6}}"}</Code>, <Code>{"{{faker.macAddress}}"}</Code>, <Code>{"{{faker.userAgent}}"}</Code>, <Code>{"{{faker.password}}"}</Code></Li>
+          <Li><b>Address</b> — <Code>{"{{faker.streetAddress}}"}</Code>, <Code>{"{{faker.city}}"}</Code>, <Code>{"{{faker.state}}"}</Code>, <Code>{"{{faker.country}}"}</Code>, <Code>{"{{faker.countryCode}}"}</Code>, <Code>{"{{faker.zipCode}}"}</Code>, <Code>{"{{faker.latitude}}"}</Code>, <Code>{"{{faker.longitude}}"}</Code></Li>
+          <Li><b>Finance</b> — <Code>{"{{faker.creditCardNumber}}"}</Code> (Luhn-valid), <Code>{"{{faker.creditCardCvv}}"}</Code>, <Code>{"{{faker.creditCardExpiry}}"}</Code> (YYYY-MM), <Code>{"{{faker.iban}}"}</Code>, <Code>{"{{faker.bic}}"}</Code>, <Code>{"{{faker.currency}}"}</Code>, <Code>{"{{faker.amount}}"}</Code></Li>
+          <Li><b>Commerce</b> — <Code>{"{{faker.companyName}}"}</Code>, <Code>{"{{faker.productName}}"}</Code>, <Code>{"{{faker.productPrice}}"}</Code>, <Code>{"{{faker.department}}"}</Code></Li>
+          <Li><b>Text</b> — <Code>{"{{faker.lorem}}"}</Code> (sentence), <Code>{"{{faker.lorem(N)}}"}</Code> (N words), <Code>{"{{faker.loremParagraph}}"}</Code>, <Code>{"{{faker.word}}"}</Code></Li>
+        </UL>
+        <Note>
+          Faker values are <b>not stable</b> — each substitution produces a fresh value. If you
+          need a repeatable pseudo-random for the same key across a request, set it once via a
+          Pre-script (<Code>ctx.set("user_id", ctx.uuid())</Code>) and reuse the variable.
         </Note>
       </>
     ),
@@ -291,6 +312,52 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
           <Code>_AMQ_SCHEDULED_DELIVERY_TIME</Code> application property in the Properties tab
           (Artemis-specific).
         </Note>
+      </>
+    ),
+  },
+
+  /* ── CSV bulk send ────────────────────────────────────────────────────── */
+  {
+    id: "csv",
+    title: "CSV bulk send",
+    icon: <FileSpreadsheet className="w-3.5 h-3.5" />,
+    searchText: "csv bulk import spreadsheet excel rows columns headers tokens substitution per-row papaparse load drop preview dry run progress cancel",
+    content: (
+      <>
+        <H><FileSpreadsheet className="w-4 h-4 text-blue-500" />CSV bulk send</H>
+        <P>
+          Open the <b>CSV</b> tab in the Send view. Drop a CSV file (or click to browse); the
+          first row is treated as the header. Each subsequent row turns into one outgoing message,
+          with column values substituted into <Code>{"{{column_name}}"}</Code> tokens in Body and
+          Properties.
+        </P>
+        <H3>Workflow</H3>
+        <UL>
+          <Li><b>Load</b> — drop a <Code>.csv</Code> file or click the dropzone. Header row populates the column-token chips.</Li>
+          <Li><b>Compose your Body</b> on the regular Body tab using <Code>{"{{column_name}}"}</Code> placeholders. Click any chip in the CSV tab to copy its token to clipboard.</Li>
+          <Li><b>Preview</b> the first 5 rows in the table; click a row to drive the <i>Dry-run preview</i> below — that pane shows exactly how the Body resolves for that row, so you can confirm before sending.</Li>
+          <Li><b>Send N messages</b> kicks off the loop. Live progress bar, ok / fail counters, and a <b>Cancel</b> button that aborts cleanly at the next iteration boundary.</Li>
+        </UL>
+        <H3>Token resolution per row</H3>
+        <P>
+          For each row AMQPush stacks variables in this order — first match wins:
+        </P>
+        <UL>
+          <Li>Pre-script <Code>ctx.set(...)</Code> values (script runs once per row; column values are accessible via <Code>ctx.get("col_name")</Code>)</Li>
+          <Li>CSV column values for the current row</Li>
+          <Li>User-defined Variables tab entries</Li>
+          <Li>Built-in tokens (<Code>{"{{uuid}}"}</Code>, <Code>{"{{faker.email}}"}</Code>, etc.)</Li>
+        </UL>
+        <Row label="Per-row delay">Milliseconds between rows. <Code>0</Code> = as fast as possible (rate-limited only by broker / network).</Row>
+        <Note>
+          Schema validation is intentionally skipped in CSV mode for throughput. Validate your
+          template against a single representative row in the regular Send view first; once it
+          passes, switch to CSV mode for the bulk run.
+        </Note>
+        <Warn>
+          Sending thousands of messages is destructive on production queues. Always test against
+          a dev profile first; the dry-run preview is your friend.
+        </Warn>
       </>
     ),
   },
@@ -394,7 +461,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "receive",
     title: "Receive",
     icon: <Inbox className="w-3.5 h-3.5" />,
-    searchText: "receive subscriber subscribe live messages filter consume credit reconnect drainer notifications dla",
+    searchText: "receive subscriber subscribe live messages filter consume credit reconnect drainer notifications dla selector jms broker filter expression where priority",
     content: (
       <>
         <H><Inbox className="w-4 h-4 text-blue-500" />Receive (subscriber)</H>
@@ -410,6 +477,28 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
           <Li><b>Filter</b> restricts the visible list to rows matching a substring (case-insensitive across body + properties).</Li>
           <Li><b>Reply</b> on a message pre-fills Send with the original's <Code>correlation-id</Code>.</Li>
         </UL>
+        <H3>Broker-side selectors (filter on the wire)</H3>
+        <P>
+          Click the <Filter className="w-3 h-3 inline-block align-middle" /> <b>Selector</b>{" "}
+          button next to the queue picker to expand the filter input. Enter a JMS-style
+          expression like{" "}
+          <Code>{"priority > 5 AND application_property:type = 'order'"}</Code>{" "}
+          and the broker will only deliver matching messages — non-matches stay on the queue
+          for other consumers.
+        </P>
+        <P>
+          AMQPush packages the expression as an AMQP 1.0 source filter under the descriptor
+          {" "}<Code>apache.org:selector-filter:string</Code>, which is the de-facto standard
+          accepted by Artemis, ActiveMQ Classic, Qpid Broker-J, and most JMS-compatible
+          brokers. Active subscriptions with a selector get a small{" "}
+          <Filter className="w-3 h-3 inline-block align-middle text-blue-500" /> badge on
+          their chip, and the tooltip shows the selector text.
+        </P>
+        <Note>
+          Selectors only see what the broker exposes — typically standard AMQP properties and
+          application properties. They cannot match on body content. Empty selector = no filter
+          (broker delivers everything, same as before).
+        </Note>
         <Note>
           On Artemis with <Code>send-to-dla-on-no-route</Code> enabled, AMQPush silently drains the
           internal <Code>activemq.notifications</Code> address so unrouted notifications don't pile
@@ -424,7 +513,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "browser",
     title: "Browser",
     icon: <ListTree className="w-3.5 h-3.5" />,
-    searchText: "browser queue browser peek messages purge delete management rpc artemis remove all messages refresh",
+    searchText: "browser queue browser peek messages purge delete management rpc artemis remove all messages refresh dlq dead letter requeue redeliver original destination",
     content: (
       <>
         <H><ListTree className="w-4 h-4 text-blue-500" />Queue browser</H>
@@ -448,6 +537,40 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
           Purge is destructive and cannot be undone. The message count is the broker-reported size
           at the moment of confirmation — concurrent producers may add more after.
         </Warn>
+
+        <H3>DLQ inspection &amp; requeue</H3>
+        <P>
+          Browser auto-detects <b>dead-letter queues</b> by name — anything matching{" "}
+          <Code>DLQ</Code>, <Code>*.DLQ</Code>, <Code>*_dlq</Code>, <Code>ActiveMQ.DLQ</Code>,
+          <Code>ExpiryQueue</Code>, or simply containing "dlq" / "dead" (case-insensitive).
+          When you peek into a DLQ a banner appears under the header explaining how requeue
+          works on your broker, plus a green <b>Requeue all</b> button next to Purge.
+        </P>
+        <P>
+          AMQPush reads the original destination from the message's application properties in
+          this priority order:
+        </P>
+        <UL>
+          <Li><Code>_AMQ_ORIG_ADDRESS</Code> — Artemis (most common)</Li>
+          <Li><Code>_AMQ_ORIG_QUEUE</Code> — Artemis fallback (queue-level)</Li>
+          <Li><Code>originalDestination</Code> — ActiveMQ Classic</Li>
+          <Li><Code>JMSXOriginalDestination</Code></Li>
+        </UL>
+        <P>
+          For each requeued message AMQPush strips DLQ-internal markers (<Code>_AMQ_ORIG_*</Code>,
+          <Code>_AMQ_DLA_HISTORY</Code>, <Code>originalDestination</Code>, etc.) before
+          republishing, so the broker doesn't immediately re-DLQ the copy if delivery fails again.
+          The body and remaining application properties go through unchanged.
+        </P>
+        <P>
+          You can also requeue messages individually: expanding any DLQ message reveals a{" "}
+          <b>{"Requeue → <origin>"}</b> chip at the top of its details pane.
+        </P>
+        <Note>
+          Requeue does <i>not</i> delete the original from the DLQ — peek-and-republish leaves
+          the source untouched. After a successful Requeue all, follow up with the Purge button
+          to clean up.
+        </Note>
       </>
     ),
   },

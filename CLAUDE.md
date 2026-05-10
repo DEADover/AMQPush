@@ -127,8 +127,16 @@ Every send adds (see amqp.rs + lib.rs):
 
 ## Releases — always do this
 
-When the user asks for a release (`vX.Y.Z`), do **all** of the following — don't
-ship a half-finished one and wait for the user to nudge:
+**Never tag, push a tag, or publish a release without an explicit user request.**
+The CI workflow fires on any `v*` tag push and creates a GitHub Release
+automatically — so even just creating a tag is "publishing a release". Don't
+do it on your own initiative.
+
+When you finish a feature or batch of changes, summarise what's done and stop.
+The user decides when (and whether) to cut a release.
+
+When the user **does** ask for a release (`vX.Y.Z`), do all of the following —
+don't ship a half-finished one and wait for the user to nudge:
 
 1. **Bump versions** in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`
    (`package.json` stays at `0.1.0`, that's intentional).
@@ -161,6 +169,13 @@ Don't wait to be told to do step 6 — it's part of "doing the release".
 
 - **Always run `npx tsc --noEmit`** after frontend edits to catch type errors.
 - **Always run `cargo build --no-default-features`** in `src-tauri/` after Rust edits.
+- **Update `src/components/HelpModal.tsx`** whenever you add or rename a
+  user-visible feature. The help modal is the in-app guide users open via the
+  `?` icon — it must stay in sync, not just the README. Add a new section in
+  the `SECTIONS` array, or extend an existing one (e.g. CSV bulk send goes
+  inside Send / a sibling of Batch & Schedule; broker selectors go into the
+  Receive section; DLQ requeue goes into Browser; new `{{token}}` sets
+  extend Variables). Faking it forces the user to ask for the update later.
 - After Rust changes, restart with full process kill (else old binary lingers):
   ```
   pkill -9 -f "target/debug/AMQPush"
