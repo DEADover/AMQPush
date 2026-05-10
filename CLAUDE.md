@@ -125,6 +125,38 @@ Every send adds (see amqp.rs + lib.rs):
 - Universal (Intel + ARM) macOS: `npm run tauri build -- --target universal-apple-darwin`.
 - For Intel-only: target `x86_64-apple-darwin` (need `rustup target add x86_64-apple-darwin`).
 
+## Releases — always do this
+
+When the user asks for a release (`vX.Y.Z`), do **all** of the following — don't
+ship a half-finished one and wait for the user to nudge:
+
+1. **Bump versions** in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`
+   (`package.json` stays at `0.1.0`, that's intentional).
+2. **Write a Keep-a-Changelog entry** in `CHANGELOG.md` with a `### Highlights`
+   block + `### Added` / `### Changed` / `### Fixed` / `### Backend` sections,
+   plus a `[X.Y.Z]: https://github.com/DEADover/AMQPush/releases/tag/vX.Y.Z`
+   link reference at the bottom.
+3. **Verify**: `npx tsc --noEmit` and `cargo build --no-default-features` in
+   `src-tauri/` must both be clean.
+4. **Commit** with message `release: vX.Y.Z — <subtitle>` and the
+   `Co-Authored-By` trailer.
+5. **Tag + push** — `git tag -a vX.Y.Z -m "AMQPush vX.Y.Z"` then push both
+   `main` and the tag. CI (`.github/workflows/release.yml`) fires on the tag
+   push and runs `tauri-action` across macOS / Windows / Linux. Builds take
+   ~8 min total.
+6. **Format the GitHub release the same way as v1.1.0**, not the placeholder
+   body that `tauri-action` writes. Specifically:
+   - **Title**: `vX.Y.Z — <subtitle from highlights>`.
+   - **Body**: a `## Downloads` table at the top with platform / file / size
+     for every artefact, then the security-warning blockquote (Gatekeeper /
+     SmartScreen / `chmod +x` for AppImage), a `---` divider, then the
+     verbatim `## [X.Y.Z] — DATE` section pulled from `CHANGELOG.md`.
+   - Update with `gh release edit vX.Y.Z --title ... --notes-file ...`.
+     Extract the changelog block via
+     `awk '/^## \[X\.Y\.Z\]/,/^## \[<previous>\]/' CHANGELOG.md | sed '$d'`.
+
+Don't wait to be told to do step 6 — it's part of "doing the release".
+
 ## When making changes
 
 - **Always run `npx tsc --noEmit`** after frontend edits to catch type errors.
