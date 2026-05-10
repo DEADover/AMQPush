@@ -18,6 +18,12 @@ interface HelpSection {
   searchText: string;
   /** Rendered React content. */
   content: ReactNode;
+  /** When set, this section is rendered indented under its parent in the
+   *  sidebar nav. Order in the SECTIONS array still controls vertical
+   *  position — children should immediately follow their parent. Search
+   *  treats the index as flat: a child can match independently of its
+   *  parent. */
+  parentId?: string;
 }
 
 /* Small layout primitives used by every section ─ keeps content tidy. */
@@ -198,6 +204,7 @@ const SECTIONS: HelpSection[] = [
     id: "variables",
     title: "Variables",
     icon: <Braces className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "variables substitution placeholders user variables built-in uuid timestamp now date prebuilt template tokens curly braces faker email name address credit card iban lorem ipsum phone username password",
     content: (
       <>
@@ -256,6 +263,7 @@ const SECTIONS: HelpSection[] = [
     id: "prescript",
     title: "Pre-script",
     icon: <Code2 className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "pre-script javascript sandbox dynamic variables ctx.set quickjs runtime per-send",
     content: (
       <>
@@ -289,6 +297,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "batch",
     title: "Batch & Schedule",
     icon: <Repeat2 className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "batch repeat delay schedule delayed first send loop count throughput cancel abort",
     content: (
       <>
@@ -321,6 +330,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "csv",
     title: "CSV bulk send",
     icon: <FileSpreadsheet className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "csv bulk import spreadsheet excel rows columns headers tokens substitution per-row papaparse load drop preview dry run progress cancel",
     content: (
       <>
@@ -338,6 +348,37 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
           <Li><b>Preview</b> the first 5 rows in the table; click a row to drive the <i>Dry-run preview</i> below — that pane shows exactly how the Body resolves for that row, so you can confirm before sending.</Li>
           <Li><b>Send N messages</b> kicks off the loop. Live progress bar, ok / fail counters, and a <b>Cancel</b> button that aborts cleanly at the next iteration boundary.</Li>
         </UL>
+
+        <H3>Example</H3>
+        <P>Save the following as <Code>orders.csv</Code> and load it from the CSV tab:</P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`order_id,customer,amount,currency,country
+1001,Alice Smith,49.99,USD,US
+1002,Bob Müller,150.00,EUR,DE
+1003,Charlie Park,2750,KRW,KR
+1004,Dana Patel,89.50,INR,IN`}</pre>
+        <P>Compose the Body on the Body tab as JSON with column tokens:</P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`{
+  "id": "ORD-{{order_id}}",
+  "customer": "{{customer}}",
+  "total": {{amount}},
+  "currency": "{{currency}}",
+  "country": "{{country}}",
+  "request_id": "{{uuid}}",
+  "received_at": "{{timestamp}}"
+}`}</pre>
+        <P>
+          For row 1 the dry-run preview will show <Code>"id": "ORD-1001"</Code>, <Code>"customer": "Alice Smith"</Code>,
+          <Code>"total": 49.99</Code>, etc. <Code>{"{{uuid}}"}</Code> and <Code>{"{{timestamp}}"}</Code>
+          are <i>not</i> CSV columns — they're built-ins that re-evaluate per row, so each message
+          gets a fresh request id and sent timestamp.
+        </P>
+        <Note>
+          Numeric columns work as JSON values without quoting — <Code>{"{{amount}}"}</Code> resolves
+          to <Code>49.99</Code>, which is valid JSON. For string-typed values keep the quotes
+          around the token (<Code>{"\"{{customer}}\""}</Code>) so the rendered result is a proper
+          JSON string. AMQPush validates the Body template (with tokens replaced by neutral
+          placeholders) so an invalid pattern is flagged before any rows go out.
+        </Note>
         <H3>Token resolution per row</H3>
         <P>
           For each row AMQPush stacks variables in this order — first match wins:
@@ -367,6 +408,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "reply",
     title: "Request-Reply",
     icon: <CornerDownLeft className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "request reply correlation id reply-to dynamic source temporary queue rpc round trip",
     content: (
       <>
@@ -391,6 +433,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "templates",
     title: "Templates",
     icon: <BookMarked className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "templates save load rename delete preset reuse json file",
     content: (
       <>
@@ -419,6 +462,7 @@ ctx.set("routing", "us-east." + (n % 4));`}</pre>
     id: "schema",
     title: "Body validation",
     icon: <ShieldCheck className="w-3.5 h-3.5" />,
+    parentId: "send",
     searchText: "schema validation json schema ajv xsd xml validation xmllint draft 2020 upload paste error file",
     content: (
       <>
@@ -816,21 +860,26 @@ export default function HelpModal({
             <div className="flex-1 overflow-y-auto py-1">
               {filteredSections.length === 0 ? (
                 <div className="px-3 py-2 text-[12px] text-t-ink5">No matches</div>
-              ) : filteredSections.map(s => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => setActiveId(s.id)}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
-                    s.id === active.id
-                      ? "bg-blue-500/15 text-blue-500"
-                      : "text-t-ink2 hover:bg-t-hover/50 hover:text-t-ink"
-                  }`}
-                >
-                  <span className="shrink-0">{s.icon}</span>
-                  <span className="truncate">{s.title}</span>
-                </button>
-              ))}
+              ) : filteredSections.map(s => {
+                const isChild = !!s.parentId;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setActiveId(s.id)}
+                    className={`w-full flex items-center gap-2 ${isChild ? "pl-7 pr-3" : "px-3"} py-1.5 text-left text-[12px] transition-colors ${
+                      s.id === active.id
+                        ? "bg-blue-500/15 text-blue-500"
+                        : isChild
+                          ? "text-t-ink3 hover:bg-t-hover/50 hover:text-t-ink"
+                          : "text-t-ink2 hover:bg-t-hover/50 hover:text-t-ink"
+                    }`}
+                  >
+                    <span className="shrink-0">{s.icon}</span>
+                    <span className="truncate">{s.title}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
