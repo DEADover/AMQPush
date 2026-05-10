@@ -178,8 +178,11 @@ export default function TokenInput({
             onMouseDown={e => e.preventDefault()}
           >
             {/* Main popup — bg-t-card, border-t-line, 6 px radius, soft
-                shadow; identical to CodeMirror's tooltip rules. */}
-            <div className="min-w-[220px] max-w-md bg-t-card border border-t-line rounded-md text-t-ink shadow-[0_4px_12px_rgba(0,0,0,0.15)] overflow-hidden">
+                shadow; identical to CodeMirror's tooltip rules. Width is
+                intrinsic (`w-max`) so the popup hugs its longest item the
+                same way CodeMirror's does, with a small floor for stability
+                when only one short match is filtered. */}
+            <div className="w-max min-w-[180px] bg-t-card border border-t-line rounded-md text-t-ink shadow-[0_4px_12px_rgba(0,0,0,0.15)] overflow-hidden">
               <ul className="max-h-60 overflow-y-auto m-0 p-0 list-none">
                 {filtered.map((s, i) => (
                   <li
