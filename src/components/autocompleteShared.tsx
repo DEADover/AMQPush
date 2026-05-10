@@ -1,5 +1,5 @@
 import { EditorView } from "@codemirror/view";
-import { ReactNode } from "react";
+import { ReactNode, useMemo } from "react";
 
 /**
  * Single source of truth for the `{{token}}` autocomplete popup visuals.
@@ -99,6 +99,25 @@ function typeIcon(group?: string): ReactNode {
 }
 
 export function AutocompletePopup({ items, activeIdx, onPick, onHover, className }: PopupProps) {
+  // Compute popup width directly from the longest row. CSS `width:
+  // max-content` was unreliable across layout contexts (rows in narrow
+  // grid cells stayed clamped), so we go the simpler route: find the
+  // widest `name + group` across the full list and translate to pixels.
+  // Monospace at 12 px → ≈ 7.2 px per char; +30 px covers the fixed
+  // padding (16 px) + icon column (1 ch ≈ 7 px) + margins (6 + 8 px).
+  // Using `ch` units lets the browser use the real font metric instead
+  // of our rough px estimate, so the popup is exact across fonts.
+  const popupWidth = useMemo(() => {
+    let maxChars = 0;
+    for (const it of items) {
+      const w = it.name.length + (it.group?.length ?? 0);
+      if (w > maxChars) maxChars = w;
+    }
+    // +1 ch for the icon column; +30 px for paddings (8+8) + icon
+    // marginRight (6) + group marginLeft (8).
+    return `calc(${maxChars + 1}ch + 30px)`;
+  }, [items]);
+
   if (items.length === 0) return null;
   const active = items[activeIdx];
 
@@ -117,7 +136,7 @@ export function AutocompletePopup({ items, activeIdx, onPick, onHover, className
           borderRadius: RADIUS,
           boxShadow:    SHADOW,
           minWidth:     MIN_WIDTH,
-          width:        "max-content",
+          width:        popupWidth,
           color:        "rgb(var(--t-ink))",
           overflow:     "hidden",
         }}
