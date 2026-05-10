@@ -784,11 +784,10 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     // values in the inputs.
     const n     = batchEnabled ? Math.max(1, Number(repeat)  || 1) : 1;
     const delay = batchEnabled ? Math.max(0, Number(delayMs) || 0) : 0;
-    const customProps = collectProps();
-    // Auto content-type from rawType
-    if (mode === "raw" && RAW_TYPE_CT[rawType] && !customProps["content-type"]) {
-      customProps["content-type"] = RAW_TYPE_CT[rawType]!;
-    }
+    // `rawProps` holds the unsubstituted template — `{{token}}` resolution
+    // happens per-iteration below so `{{counter}}` / `{{uuid}}` / faker
+    // tokens update each send the same way they do in the body.
+    const rawProps = collectProps();
     const replyTo = rrEnabled && rrAddress.trim() ? rrAddress.trim() : null;
     const startedAt = Date.now();
     setSending(true);
@@ -854,6 +853,22 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           mode === "raw"  ? applyVariables(text.trim(), scriptVars) :
           mode === "none" ? "" :
           null;
+
+        // Resolve property values per iteration so they pick up the same
+        // dynamic tokens (counter, uuid, faker, pre-script vars) that the
+        // body sees. Keys are kept verbatim — substitution there is more
+        // surprising than useful, and AMQP property names are usually
+        // fixed by the consumer's contract.
+        const customProps: Record<string, string> = {};
+        for (const [k, v] of Object.entries(rawProps)) {
+          customProps[k] = applyVariables(v, scriptVars);
+        }
+        // Auto content-type from rawType, applied here so a user-set
+        // `{{content-type}}` token in Properties wins.
+        if (mode === "raw" && RAW_TYPE_CT[rawType] && !customProps["content-type"]) {
+          customProps["content-type"] = RAW_TYPE_CT[rawType]!;
+        }
+
         const result = await invoke<SendResult>("send_message", mode === "binary" && file
           ? { address: address.trim(), text: null, fileName: file.name, fileDataB64: await toBase64(file), customProps, replyTo, profile: activeProfile || null }
           : { address: address.trim(), text: resolvedText, fileName: null, fileDataB64: null, customProps, replyTo, profile: activeProfile || null }
@@ -1185,7 +1200,9 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
 
             {/* Sub-toolbar */}
             <div className="shrink-0 h-9 px-3 flex items-center gap-2 border-b border-t-line bg-t-panel">
-              <span className="text-[11px] text-t-ink4">Custom AMQP message properties — sent as application-properties.</span>
+              <span className="text-[11px] text-t-ink4">
+                Custom application-properties — values support <code className="text-blue-500 font-mono">{`{{token}}`}</code> substitution.
+              </span>
               <button onClick={addProp}
                 className="ml-auto px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors flex items-center gap-1">
                 <Plus className="w-3 h-3" /> Add
@@ -1228,7 +1245,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       placeholder="key"
                       className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 font-mono py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
                     <input value={row.value} onChange={e => updateProp(row.id, "value", e.target.value)}
-                      placeholder="value"
+                      placeholder="value (supports {{tokens}})"
                       className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
                     <input value={row.description ?? ""} onChange={e => updateProp(row.id, "description", e.target.value)}
                       placeholder="description"
