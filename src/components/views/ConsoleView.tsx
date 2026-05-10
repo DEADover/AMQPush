@@ -9,6 +9,7 @@ import EmptyState from "../EmptyState";
 import SegmentedControl from "../SegmentedControl";
 import Dropdown, { DropdownItem } from "../Dropdown";
 import SectionLabel from "../SectionLabel";
+import ConfirmDialog from "../ConfirmDialog";
 import { csvEscape } from "../../utils/format";
 
 interface Props {
@@ -90,6 +91,7 @@ const COLS = "grid grid-cols-[170px_70px_1fr] gap-3 items-start";
 
 export default function ConsoleView({ logs, onClear }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [search,     setSearch]     = useState("");
   const [level,      setLevel]      = useState<LevelFilter>("all");
   const [datePreset, setDatePreset] = useState<DatePreset>("all");
@@ -266,13 +268,30 @@ export default function ConsoleView({ logs, onClear }: Props) {
         </Dropdown>
 
         <button
-          onClick={onClear}
+          onClick={() => setConfirmClear(true)}
           disabled={logs.length === 0}
           className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent"
         >
           <Trash2 className="w-3 h-3" /> Clear
         </button>
       </ViewTopBar>
+
+      <ConfirmDialog
+        open={confirmClear}
+        title="Clear all logs"
+        body={
+          <p>
+            Permanently delete{" "}
+            <span className="font-mono font-bold text-t-ink">{logs.length.toLocaleString()}</span>{" "}
+            log entr{logs.length === 1 ? "y" : "ies"}?
+            This wipes the in-memory buffer <i>and</i> the persisted copy in <code className="text-t-ink4">localStorage</code> —
+            past activity won't be recoverable.
+          </p>
+        }
+        confirmLabel={`Delete ${logs.length.toLocaleString()} entr${logs.length === 1 ? "y" : "ies"}`}
+        onConfirm={() => { onClear(); setConfirmClear(false); }}
+        onCancel={() => setConfirmClear(false)}
+      />
 
       {/* ─── FILTER BAR ─── */}
       <div className="shrink-0 px-3 py-1 border-b border-t-line bg-t-panel flex items-center gap-2">

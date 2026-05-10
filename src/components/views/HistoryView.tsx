@@ -10,6 +10,7 @@ import PropsList from "../PropsList";
 import EmptyState from "../EmptyState";
 import ViewTopBar from "../ViewTopBar";
 import CopyButton from "../CopyButton";
+import ConfirmDialog from "../ConfirmDialog";
 import { fmtBytes } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
@@ -27,6 +28,8 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
   const [search,     setSearch]     = useState("");
   const [loading,    setLoading]    = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -43,9 +46,19 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
     load();
   }, [refreshVersion]);
 
-  async function clearAll() {
-    try { await invoke("clear_history"); setEntries([]); setSelectedId(null); onLog("info", "History cleared"); }
-    catch (e) { onLog("err", String(e)); }
+  async function clearAllConfirmed() {
+    setClearing(true);
+    try {
+      await invoke("clear_history");
+      setEntries([]);
+      setSelectedId(null);
+      onLog("info", "History cleared");
+      setConfirmClear(false);
+    } catch (e) {
+      onLog("err", String(e));
+    } finally {
+      setClearing(false);
+    }
   }
 
   async function exportAs(format: "json" | "csv") {
@@ -127,11 +140,29 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
           className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
           <Download className="w-3 h-3" /> CSV
         </button>
-        <button onClick={clearAll} disabled={entries.length === 0}
+        <button onClick={() => setConfirmClear(true)} disabled={entries.length === 0}
           className="px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent flex items-center gap-1">
           <Trash2 className="w-3 h-3" /> Clear
         </button>
       </ViewTopBar>
+
+      <ConfirmDialog
+        open={confirmClear}
+        title="Clear send history"
+        body={
+          <p>
+            Permanently delete{" "}
+            <span className="font-mono font-bold text-t-ink">{entries.length.toLocaleString()}</span>{" "}
+            history entr{entries.length === 1 ? "y" : "ies"} from <code className="text-t-ink4">~/.amqpush/history.json</code>?
+            This cannot be undone — resending past messages will no longer be possible.
+          </p>
+        }
+        confirmLabel={`Delete ${entries.length.toLocaleString()} entr${entries.length === 1 ? "y" : "ies"}`}
+        busy={clearing}
+        busyLabel="Deleting…"
+        onConfirm={clearAllConfirmed}
+        onCancel={() => setConfirmClear(false)}
+      />
 
       {/* ─── FILTER BAR — only when entries exist ─── */}
       {entries.length > 0 && (

@@ -19,6 +19,7 @@ import SectionLabel from "../SectionLabel";
 import Toggle from "../Toggle";
 import SegmentedControl from "../SegmentedControl";
 import Callout from "../Callout";
+import ConfirmDialog from "../ConfirmDialog";
 import Dropdown, { DropdownItem } from "../Dropdown";
 import CopyButton from "../CopyButton";
 
@@ -210,6 +211,8 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   /** True while a file is being dragged over the CSV dropzone — drives the
    *  visual feedback. */
   const [csvDragOver, setCsvDragOver] = useState(false);
+  /** Confirm gate before wiping a loaded CSV (rows + headers + filename). */
+  const [confirmClearCsv, setConfirmClearCsv] = useState(false);
   /** JavaScript source that runs before each send. Set vars via `ctx.set(name, value)`. */
   const [preScript,  setPreScript]  = useState("");
   /** Per-language schema sources. The active schema for the current Raw
@@ -1512,7 +1515,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                     </button>
                     <button
                       type="button"
-                      onClick={clearCsv}
+                      onClick={() => setConfirmClearCsv(true)}
                       className="p-1 rounded text-t-ink4 hover:text-red-500 hover:bg-t-hover transition-colors"
                       title="Clear CSV"
                     >
@@ -2036,6 +2039,22 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           onLog={onLog}
         />
       )}
+
+      {/* ─── CLEAR-CSV CONFIRM ─── */}
+      <ConfirmDialog
+        open={confirmClearCsv}
+        title="Clear CSV"
+        body={
+          <p>
+            Discard <span className="font-mono font-bold text-t-ink">{csvFileName}</span> and
+            its <span className="font-mono">{csvRows.length.toLocaleString()}</span>{" "}
+            row{csvRows.length === 1 ? "" : "s"}? You'll need to re-load the file to send again.
+          </p>
+        }
+        confirmLabel="Clear CSV"
+        onConfirm={() => { clearCsv(); setConfirmClearCsv(false); }}
+        onCancel={() => setConfirmClearCsv(false)}
+      />
     </div>
   );
 }
@@ -2061,6 +2080,7 @@ function SchemaModal({
   language, value, onChange, result, validating, bodyEmpty, onClose, onLog,
 }: SchemaModalProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
   const isJson = language === "json";
   const title = isJson ? "JSON Schema" : "XML Schema (XSD)";
   const editorLang = isJson ? "json" : "xml";
@@ -2194,7 +2214,7 @@ function SchemaModal({
           {value.trim() && (
             <button
               type="button"
-              onClick={clearSchema}
+              onClick={() => setConfirmClear(true)}
               className="flex items-center gap-1 text-[11px] text-t-ink4 hover:text-red-500 px-2 py-1 rounded transition-colors"
               title="Clear schema"
             >
@@ -2245,6 +2265,21 @@ function SchemaModal({
           </span>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmClear}
+        title={`Clear ${isJson ? "JSON Schema" : "XSD"}`}
+        body={
+          <p>
+            Discard the current {isJson ? "JSON Schema" : "XSD"}? You'll lose any unsaved
+            edits — the schema textarea will be emptied. This doesn't affect the schema saved
+            in the active template.
+          </p>
+        }
+        confirmLabel="Clear schema"
+        onConfirm={() => { clearSchema(); setConfirmClear(false); }}
+        onCancel={() => setConfirmClear(false)}
+      />
     </div>
   );
 }

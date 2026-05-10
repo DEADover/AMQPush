@@ -11,6 +11,7 @@ import BrowserView from "./components/views/BrowserView";
 import Dropdown, { DropdownItem, DropdownSection, DropdownFooter } from "./components/Dropdown";
 import CommandPalette, { PaletteAction } from "./components/CommandPalette";
 import HelpModal from "./components/HelpModal";
+import ConfirmDialog from "./components/ConfirmDialog";
 import { useTheme } from "./hooks/useTheme";
 import { LogEntry, View, Profile } from "./types";
 import { invoke } from "@tauri-apps/api/core";
@@ -304,6 +305,10 @@ export default function App() {
   const [updateInfo,    setUpdateInfo]    = useState<UpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  /** Confirm dialog before wiping the log buffer via the Cmd+K palette.
+   *  ConsoleView's in-view Clear button has its own confirm; this one is
+   *  the parallel for the palette path so both routes are gated. */
+  const [confirmClearLogs, setConfirmClearLogs] = useState(false);
   const [paletteOpen,   setPaletteOpen]   = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -598,7 +603,7 @@ export default function App() {
               try { await invoke("disconnect"); setConnected(false); addLog("info", "Disconnected"); }
               catch (e) { addLog("err", String(e)); }
             },
-            clearLogs: () => setLogs([]),
+            clearLogs: () => setConfirmClearLogs(true),
             showUpdateModal: () => setShowUpdateModal(true),
             hasUpdate: !!updateInfo,
             showHelp: () => setShowHelp(true),
@@ -625,6 +630,23 @@ export default function App() {
 
       {/* ─── HELP MODAL ─── */}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+
+      {/* ─── CLEAR-LOGS CONFIRM (Cmd+K route) ─── */}
+      <ConfirmDialog
+        open={confirmClearLogs}
+        title="Clear all logs"
+        body={
+          <p>
+            Permanently delete{" "}
+            <span className="font-mono font-bold text-t-ink">{logs.length.toLocaleString()}</span>{" "}
+            log entr{logs.length === 1 ? "y" : "ies"}? This wipes the in-memory
+            buffer <i>and</i> the persisted copy in <code className="text-t-ink4">localStorage</code>.
+          </p>
+        }
+        confirmLabel={`Delete ${logs.length.toLocaleString()} entr${logs.length === 1 ? "y" : "ies"}`}
+        onConfirm={() => { setLogs([]); setConfirmClearLogs(false); }}
+        onCancel={() => setConfirmClearLogs(false)}
+      />
     </div>
   );
 }

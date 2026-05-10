@@ -15,6 +15,7 @@ import PropsList from "../PropsList";
 import EmptyState from "../EmptyState";
 import SectionLabel from "../SectionLabel";
 import ViewTopBar from "../ViewTopBar";
+import ConfirmDialog from "../ConfirmDialog";
 import { fmtBytes, fmtDuration, csvEscape } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 
@@ -134,6 +135,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
   const [showSelector, setShowSelector] = useState(false);
   const [paused,       setPaused]       = useState(false);
   const [messages,     setMessages]     = useState<ReceivedMessage[]>([]);
+  const [confirmClearMsgs, setConfirmClearMsgs] = useState(false);
   const [filter,       setFilter]       = useState("");
   const [filterErr,    setFilterErr]    = useState(false);
   const [autoScroll,   setAutoScroll]   = useState(true);
@@ -716,12 +718,30 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
             )}
           </div>
 
-          <button onClick={clearMessages}
-            className="flex items-center gap-1 text-[11px] text-t-ink4 hover:text-red-500 transition-colors shrink-0">
+          <button onClick={() => setConfirmClearMsgs(true)}
+            disabled={messages.length === 0}
+            className="flex items-center gap-1 text-[11px] text-t-ink4 hover:text-red-500 transition-colors shrink-0 disabled:opacity-40 disabled:hover:text-t-ink4">
             <Trash2 className="w-3 h-3" /> Clear
           </button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmClearMsgs}
+        title="Clear received messages"
+        body={
+          <p>
+            Discard{" "}
+            <span className="font-mono font-bold text-t-ink">{messages.length.toLocaleString()}</span>{" "}
+            received message{messages.length === 1 ? "" : "s"} from this session?
+            {persistEnabled && <> The persisted copy in <code className="text-t-ink4">localStorage</code> will also be wiped.</>}
+            {" "}Subscription stays active — new arrivals will continue to populate the list.
+          </p>
+        }
+        confirmLabel={`Clear ${messages.length.toLocaleString()} message${messages.length === 1 ? "" : "s"}`}
+        onConfirm={() => { clearMessages(); setConfirmClearMsgs(false); }}
+        onCancel={() => setConfirmClearMsgs(false)}
+      />
 
       {/* ─── REFERENCE / DIFF BAR ─── */}
       {refMsg && (
