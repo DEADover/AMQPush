@@ -12,6 +12,7 @@ import QueuePicker from "../QueuePicker";
 import { applyVariables, runPreScript, VARIABLE_HINTS, UserVariable } from "../../utils/variables";
 import Ajv, { ErrorObject } from "ajv";
 import CodeEditor, { VariableSuggestion } from "../CodeEditor";
+import TokenInput from "../TokenInput";
 import Tabs, { TabItem } from "../Tabs";
 import ViewTopBar from "../ViewTopBar";
 import EmptyState from "../EmptyState";
@@ -1244,9 +1245,13 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                     <input value={row.key} onChange={e => updateProp(row.id, "key", e.target.value)}
                       placeholder="key"
                       className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 font-mono py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
-                    <input value={row.value} onChange={e => updateProp(row.id, "value", e.target.value)}
+                    <TokenInput
+                      value={row.value}
+                      onChange={v => updateProp(row.id, "value", v)}
+                      suggestions={variableSuggestions}
                       placeholder="value (supports {{tokens}})"
-                      className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
+                      className="w-full bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30"
+                    />
                     <input value={row.description ?? ""} onChange={e => updateProp(row.id, "description", e.target.value)}
                       placeholder="description"
                       className="bg-transparent text-[12px] text-t-ink3 outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
