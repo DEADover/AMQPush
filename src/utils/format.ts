@@ -10,11 +10,19 @@ export function fmtBytes(b: number): string {
   return `${(b / 1024 / 1024).toFixed(2)} MB`;
 }
 
+/**
+ * Compact duration. Three regimes by magnitude:
+ *  - `< 1 s`   → `"345ms"`   (millisecond precision)
+ *  - `< 60 s`  → `"2.05s"`   (two-decimal seconds — used by send result)
+ *  - `≥ 60 s` → `"2m 05s"`  (minute / second — used by session duration)
+ */
 export function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   const r = s % 60;
-  return m > 0 ? `${m}m ${r}s` : `${s}s`;
+  return `${m}m ${r.toString().padStart(2, "0")}s`;
 }
 
 /** Quote a CSV field — doubles internal quotes, strips line breaks. */

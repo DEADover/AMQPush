@@ -121,6 +121,10 @@ interface QueueState {
   /** JMS selector this subscription was started with (if any). Drives a
    *  small filter-chip on the active-subscription pill. */
   selector?: string;
+  /** Set when the subscriber backend hit a permanent failure (auth refused,
+   *  address not found, etc.) — retry would just loop. Chip turns red, the
+   *  X stays visible for user dismissal. */
+  unrecoverable?: { reason: string };
 }
 
 // ── component ────────────────────────────────────────────────────────────────
@@ -317,11 +321,23 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
       onLog("ok", `'${e.payload.queue}': reconnected`);
     });
     const u5 = listen<SubEvent>("subscriber_stopped", e => {
-      setQueues(prev => prev.filter(q => q.queue !== e.payload.queue));
+      // Keep the chip when the stop was triggered by an unrecoverable
+      // failure (the unrecoverable handler below tagged the queue first).
+      // Removing it would hide the error from the user.
+      setQueues(prev => prev.filter(q => q.queue !== e.payload.queue || q.unrecoverable));
+    });
+    const u6 = listen<SubEvent>("subscriber_unrecoverable", e => {
+      const reason = e.payload.message ?? "unknown";
+      onLog("err", `'${e.payload.queue}': stopped permanently — ${reason}. Fix the upstream issue and re-subscribe.`);
+      setQueues(prev => prev.map(q =>
+        q.queue === e.payload.queue
+          ? { ...q, reconnecting: false, unrecoverable: { reason } }
+          : q
+      ));
     });
     return () => {
       u1.then(f => f()); u2.then(f => f()); u3.then(f => f());
-      u4.then(f => f()); u5.then(f => f());
+      u4.then(f => f()); u5.then(f => f()); u6.then(f => f());
       if (notifTimer.current) clearTimeout(notifTimer.current);
     };
   }, []);
@@ -600,34 +616,54 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
           )}
           {/* Per-queue chips */}
           <div className="flex items-center gap-1 flex-wrap flex-1 min-w-0">
-            {queues.map(q => (
-              <span key={q.queue}
-                className={`group flex items-center gap-1.5 px-2 py-0.5 rounded-md border font-mono text-[11px] ${
-                  q.reconnecting
-                    ? "bg-amber-500/10 border-amber-500/30 text-amber-500"
-                    : "bg-t-card border-t-line text-t-ink2"
-                }`}
-                title={
-                  (q.reconnecting ? `Reconnecting to '${q.queue}'…` : `Listening on '${q.queue}'`) +
-                  (q.selector ? ` · selector: ${q.selector}` : "")
+            {queues.map(q => {
+              // Three visual states: live (green), reconnecting (amber),
+              // permanently failed (red — auth refused / address gone / etc).
+              const failedClass = q.unrecoverable
+                ? "bg-red-500/10 border-red-500/40 text-red-500"
+                : q.reconnecting
+                  ? "bg-amber-500/10 border-amber-500/30 text-amber-500"
+                  : "bg-t-card border-t-line text-t-ink2";
+              const titleText =
+                (q.unrecoverable
+                  ? `'${q.queue}': stopped permanently — ${q.unrecoverable.reason}`
+                  : q.reconnecting
+                    ? `Reconnecting to '${q.queue}'…`
+                    : `Listening on '${q.queue}'`) +
+                (q.selector ? ` · selector: ${q.selector}` : "");
+              const dismiss = () => {
+                if (q.unrecoverable) {
+                  // No backend to stop — already stopped. Just drop the
+                  // chip from local state.
+                  setQueues(prev => prev.filter(x => x.queue !== q.queue));
+                } else {
+                  removeSubscription(q.queue);
                 }
-              >
-                {q.reconnecting
-                  ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                  : <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
-                {q.queue}
-                {q.selector && (
-                  <Filter className="w-2.5 h-2.5 text-blue-500" />
-                )}
-                <button
-                  onClick={() => removeSubscription(q.queue)}
-                  className="opacity-50 group-hover:opacity-100 hover:text-red-500 transition-opacity"
-                  title={`Stop '${q.queue}'`}
+              };
+              return (
+                <span key={q.queue}
+                  className={`group flex items-center gap-1.5 px-2 py-0.5 rounded-md border font-mono text-[11px] ${failedClass}`}
+                  title={titleText}
                 >
-                  <X className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
+                  {q.unrecoverable
+                    ? <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    : q.reconnecting
+                      ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                      : <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
+                  {q.queue}
+                  {q.selector && (
+                    <Filter className="w-2.5 h-2.5 text-blue-500" />
+                  )}
+                  <button
+                    onClick={dismiss}
+                    className={`${q.unrecoverable ? "" : "opacity-50 group-hover:opacity-100"} hover:text-red-500 transition-opacity`}
+                    title={q.unrecoverable ? `Dismiss '${q.queue}'` : `Stop '${q.queue}'`}
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              );
+            })}
           </div>
 
           {/* Session stats */}

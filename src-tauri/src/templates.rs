@@ -1,10 +1,24 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// Current schema version for `Template`. See `profiles.rs` for the
+/// migration-system rationale — bump on breaking changes, add an arm to
+/// `migrate_template`, files saved by older AMQPush versions get migrated
+/// lazily on load.
+pub const CURRENT_VERSION: u32 = 1;
+
+fn default_version() -> u32 { 1 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
+    /// On-disk schema version. Missing in pre-versioning files; defaults to
+    /// `1` so they're treated as the original shape.
+    #[serde(default = "default_version")]
+    pub version: u32,
+
     pub name: String,
     pub address: String,
     pub body: String,
@@ -62,6 +76,13 @@ pub struct Template {
     /// XSD (XML Schema) source for the XML Raw subtype.
     #[serde(default)]
     pub body_schema_xsd: Option<String>,
+
+    /// Catch-all for fields not modelled here. Without it, hand-edited custom
+    /// keys (or fields from a newer AMQPush version) would be silently dropped
+    /// on the first `save_template`. With `#[serde(flatten)]` they ride
+    /// through load → save round-trips intact.
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,11 +101,30 @@ fn path() -> PathBuf {
         .join("templates.json")
 }
 
+/// Step a single `Template` forward one schema version at a time until it
+/// reaches `CURRENT_VERSION`. No-op currently (v1 only); add match arms here
+/// when a breaking change requires translation.
+fn migrate_template(t: &mut Template) {
+    while t.version < CURRENT_VERSION {
+        match t.version {
+            // 1 => { ...translate v1 → v2 here...; t.version = 2 }
+            _ => {
+                eprintln!("template '{}': unknown version {}, skipping migration", t.name, t.version);
+                break;
+            }
+        }
+    }
+}
+
 pub fn load_all() -> Vec<Template> {
-    fs::read_to_string(path())
+    let mut list: Vec<Template> = fs::read_to_string(path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for t in list.iter_mut() {
+        migrate_template(t);
+    }
+    list
 }
 
 fn save_all(templates: &[Template]) {
@@ -95,9 +135,16 @@ fn save_all(templates: &[Template]) {
     let _ = fs::write(&p, serde_json::to_string_pretty(templates).unwrap_or_default());
 }
 
-pub fn save(template: Template) {
+pub fn save(mut template: Template) {
     let mut all = load_all();
     if let Some(pos) = all.iter().position(|t| t.name == template.name) {
+        // The frontend doesn't know about `extra` (it's a catch-all for
+        // hand-edited custom fields or fields from a newer AMQPush version).
+        // Preserve whatever was on disk so a vanilla save_template doesn't
+        // wipe user customisations or future-version data.
+        if template.extra.is_empty() {
+            template.extra = std::mem::take(&mut all[pos].extra);
+        }
         all[pos] = template;
     } else {
         all.push(template);

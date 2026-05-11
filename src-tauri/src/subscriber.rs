@@ -10,6 +10,40 @@ use uuid::Uuid;
 
 use crate::broker::{extract_peeked, PeekedMessage};
 
+/// Heuristic — does an AMQP error string indicate a *permanent* failure that
+/// retrying won't fix? If yes, the subscriber loop emits
+/// `subscriber_unrecoverable` and stops instead of looping forever with
+/// exponential backoff (which fills the log and hides the real problem).
+///
+/// Pattern-based because the underlying `fe2o3-amqp` error types are an enum
+/// nested across multiple crates; string matching is simpler and works across
+/// broker dialects.
+fn is_unrecoverable_amqp_error(err: &str) -> bool {
+    let s = err.to_ascii_lowercase();
+    // Authorisation / authentication — credentials wrong, ACL denies access.
+    if s.contains("unauthorized") || s.contains("unauthorised")
+        || s.contains("not authorized") || s.contains("not authorised")
+        || s.contains("access refused") || s.contains("forbidden")
+        || s.contains("authentication") || s.contains("sasl")
+    {
+        return true;
+    }
+    // Source doesn't exist any more — address deleted, never created, or typo.
+    if s.contains("not found") || s.contains("not-found")
+        || s.contains("does not exist") || s.contains("no such")
+        || s.contains("resource-deleted") || s.contains("address-not-found")
+    {
+        return true;
+    }
+    // Frame / protocol mismatch — usually a wrong port / non-AMQP endpoint.
+    if s.contains("malformed frame") || s.contains("invalid frame")
+        || s.contains("decode error") || s.contains("invalid header")
+    {
+        return true;
+    }
+    false
+}
+
 /// Build the AMQP 1.0 filter set carrying a JMS-style selector. The descriptor
 /// `apache.org:selector-filter:string` is the de-facto standard understood by
 /// Artemis, ActiveMQ Classic, and Qpid; the value is the selector text
@@ -203,7 +237,27 @@ async fn run_loop(
                 )
                 .ok();
             }
-            Err(_) => {
+            Err(e) => {
+                // If the recv error itself names a permanent condition (auth
+                // failure, address deleted, protocol mismatch), don't even
+                // try to reconnect — surface as unrecoverable and let the
+                // user fix the upstream problem.
+                let err_str = format!("{e}");
+                if is_unrecoverable_amqp_error(&err_str) {
+                    let _ = receiver.detach().await;
+                    let _ = session.end().await;
+                    let _ = connection.close().await;
+                    app.emit("subscriber_unrecoverable", SubEvent {
+                        queue: queue.clone(),
+                        message: Some(err_str),
+                    }).ok();
+                    app.emit("subscriber_stopped", SubEvent {
+                        queue: queue.clone(),
+                        message: None,
+                    }).ok();
+                    return;
+                }
+
                 // Best-effort cleanup of old connection
                 let _ = receiver.detach().await;
                 let _ = session.end().await;
@@ -229,7 +283,15 @@ async fn run_loop(
                         }).ok();
                     }
                     Err(e) => {
-                        app.emit("subscriber_error", SubEvent {
+                        // Tag the failure as recoverable vs unrecoverable
+                        // so the UI can show a clear "stopped permanently"
+                        // banner instead of an ambiguous spinning state.
+                        let event_name = if is_unrecoverable_amqp_error(&e) {
+                            "subscriber_unrecoverable"
+                        } else {
+                            "subscriber_error"
+                        };
+                        app.emit(event_name, SubEvent {
                             queue: queue.clone(),
                             message: Some(e),
                         }).ok();

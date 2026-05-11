@@ -5,6 +5,10 @@
 use crate::amqp::HistoryEntry;
 use std::path::PathBuf;
 
+/// In-memory cap for history. Old installations may have files with many more
+/// entries than this — they're trimmed on first load (see `load`).
+pub const HISTORY_CAP: usize = 200;
+
 fn history_path() -> PathBuf {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -19,7 +23,19 @@ pub fn load() -> Vec<HistoryEntry> {
         Ok(d) => d,
         Err(_) => return Vec::new(),
     };
-    serde_json::from_str(&data).unwrap_or_default()
+    let mut entries: Vec<HistoryEntry> = serde_json::from_str(&data).unwrap_or_default();
+
+    // One-time trim. Older installations (before HISTORY_CAP was enforced in
+    // memory) accumulated 500-1000+ entries on disk; cap on load and rewrite
+    // so subsequent loads are fast and the file size stays bounded. Newest
+    // entries win — `save_message` in lib.rs pushes to the tail, so we keep
+    // the tail.
+    if entries.len() > HISTORY_CAP {
+        let drop = entries.len() - HISTORY_CAP;
+        entries.drain(0..drop);
+        save(&entries);
+    }
+    entries
 }
 
 pub fn save(history: &[HistoryEntry]) {

@@ -10,6 +10,7 @@ import Papa from "papaparse";
 import { PropertyRow, SendResult, Template } from "../../types";
 import QueuePicker from "../QueuePicker";
 import { applyVariables, runPreScript, VARIABLE_HINTS, UserVariable } from "../../utils/variables";
+import { fmtBytes, fmtDuration } from "../../utils/format";
 import Ajv, { ErrorObject } from "ajv";
 import CodeEditor, { VariableSuggestion } from "../CodeEditor";
 import TokenInput from "../TokenInput";
@@ -82,17 +83,6 @@ const RAW_TYPE_CT:    Record<RawType, string | null> = {
  */
 function newRowId(): number {
   return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-}
-
-function fmtBytes(b: number): string {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / 1024 / 1024).toFixed(2)} MB`;
-}
-
-function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
 }
 
 function detectHint(s: string): ContentHint {
