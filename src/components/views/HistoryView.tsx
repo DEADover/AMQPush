@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   History, Search, Trash2, RotateCcw, FileText, Tag, Download, Inbox, Mail,
-  MessageSquare, X,
+  MessageSquare, X, GitCompare,
 } from "lucide-react";
 import { HistoryEntry } from "../../types";
 import CollapsibleSection from "../CollapsibleSection";
@@ -13,6 +13,7 @@ import CopyButton from "../CopyButton";
 import ConfirmDialog from "../ConfirmDialog";
 import { fmtBytes } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
+import { diffLines } from "../../utils/diff";
 
 interface ResendArg { address: string; body?: string; fileName?: string; fileDataB64?: string; properties?: Record<string, string> }
 
@@ -207,6 +208,7 @@ export default function HistoryView({ refreshVersion, onLog, onResend }: Props) 
         {selected && (
           <PreviewPane
             entry={selected}
+            entries={entries}
             onResend={onResend}
             onLog={onLog}
             onClose={closePreview}
@@ -272,12 +274,33 @@ function ListItem({ entry, selected, onClick }: { entry: HistoryEntry; selected:
 
 // ─── Preview pane — full details on the right ───────────────────────────────
 
-function PreviewPane({ entry, onResend, onLog, onClose }: {
+function PreviewPane({ entry, entries, onResend, onLog, onClose }: {
   entry: HistoryEntry;
+  /** Full history list — needed to find a peer for body diff (the most
+   *  recent prior send to the same queue). */
+  entries: HistoryEntry[];
   onResend: (a: ResendArg) => void;
   onLog: (k: "info" | "ok" | "err", t: string) => void;
   onClose: () => void;
 }) {
+  const [diffPeer, setDiffPeer] = useState<HistoryEntry | null>(null);
+
+  // The most recent text-body entry sent to the same queue strictly
+  // before this one. Used as the default "compare with" target — that's
+  // almost always what the user wants when investigating "did this send
+  // differ from the last successful one?".
+  const previousToSameQueue = useMemo<HistoryEntry | null>(() => {
+    if (entry.is_file) return null;
+    // entries arrive most-recent first; iterate forward to find a peer
+    // that's older AND on the same address.
+    const idx = entries.findIndex(e => e.id === entry.id);
+    if (idx < 0) return null;
+    for (let i = idx + 1; i < entries.length; i++) {
+      const peer = entries[i];
+      if (peer.address === entry.address && !peer.is_file) return peer;
+    }
+    return null;
+  }, [entry, entries]);
   const [bodyMode,  setBodyMode]  = useState<"auto" | "raw" | "hex">("auto");
   const [propsOpen, setPropsOpen] = useState(true);
   const [autoOpen,  setAutoOpen]  = useState(true);
@@ -337,6 +360,16 @@ function PreviewPane({ entry, onResend, onLog, onClose }: {
                 className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-blue-500 hover:bg-blue-500/10 transition-colors"
               >
                 <RotateCcw className="w-3 h-3" /> Resend
+              </button>
+              <button
+                onClick={() => previousToSameQueue && setDiffPeer(previousToSameQueue)}
+                disabled={!previousToSameQueue}
+                title={previousToSameQueue
+                  ? `Compare body with the previous send to '${entry.address}' (${previousToSameQueue.timestamp})`
+                  : "No earlier send to this queue to compare against"}
+                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40 disabled:hover:text-t-ink4 disabled:hover:bg-transparent"
+              >
+                <GitCompare className="w-3 h-3" /> Compare
               </button>
               <CopyButton
                 value={bodyText}
@@ -463,6 +496,132 @@ function PreviewPane({ entry, onResend, onLog, onClose }: {
             </pre>
           </CollapsibleSection>
         )}
+      </div>
+
+      {diffPeer && (
+        <HistoryDiffModal
+          left={diffPeer}
+          right={entry}
+          onClose={() => setDiffPeer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HistoryDiffModal — side-by-side body diff between two history entries.
+//
+// Reuses the LCS-based `diffLines` algorithm from utils/diff.ts (same one
+// that powers SubscriberView's compare-two-messages flow). Bodies are
+// pretty-formatted before diffing — that way structural diffs in JSON/XML
+// align line-for-line instead of showing as one giant changed line.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function HistoryDiffModal({ left, right, onClose }: {
+  left: HistoryEntry;
+  right: HistoryEntry;
+  onClose: () => void;
+}) {
+  // Format each body by its likely subtype before diffing — same trick as
+  // Receive's diff modal. Avoids spurious "everything changed" when JSON is
+  // re-serialized with different whitespace.
+  const fmtBody = (e: HistoryEntry) => {
+    const raw = e.body_full ?? e.body_preview ?? "";
+    const subtype = detectFormat({ contentType: null, bodyText: raw });
+    if (subtype === "json") return tryPrettyJson(raw) ?? raw;
+    if (subtype === "xml")  return tryPrettyXml(raw)  ?? raw;
+    return raw;
+  };
+  const leftBody  = fmtBody(left);
+  const rightBody = fmtBody(right);
+  const ops = useMemo(() => diffLines(leftBody, rightBody), [leftBody, rightBody]);
+  const diffCount = ops.filter(o => o.kind !== "eq").length;
+
+  // Esc closes
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[1040px] max-w-[95vw] max-h-[90vh] flex flex-col overflow-hidden">
+
+        <div className="shrink-0 px-4 py-2.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+          <GitCompare className="w-3.5 h-3.5 text-t-ink4" />
+          <span className="text-[13px] font-semibold text-t-ink">Compare body</span>
+          <span className="text-[11px] text-t-ink5">
+            — {diffCount} line{diffCount !== 1 ? "s" : ""} differ
+          </span>
+          <button onClick={onClose} className="ml-auto p-1 rounded hover:bg-t-hover text-t-ink4 hover:text-t-ink">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Side-by-side headers */}
+        <div className="shrink-0 grid grid-cols-2 gap-px bg-t-line border-b border-t-line">
+          <div className="bg-t-panel px-3 py-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-wider text-blue-500 font-bold">Earlier</span>
+              <span className="text-[11px] font-mono text-t-ink2 truncate">{left.id}</span>
+            </div>
+            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-t-ink5 font-mono">
+              <span>{left.timestamp}</span>
+              <span>{left.address}</span>
+            </div>
+          </div>
+          <div className="bg-t-panel px-3 py-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-wider text-amber-500 font-bold">Selected</span>
+              <span className="text-[11px] font-mono text-t-ink2 truncate">{right.id}</span>
+            </div>
+            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-t-ink5 font-mono">
+              <span>{right.timestamp}</span>
+              <span>{right.address}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Body diff */}
+        <div className="flex-1 overflow-y-auto font-mono text-[11px] leading-5">
+          {ops.map((op, i) => {
+            const bg =
+              op.kind === "del" ? "bg-red-500/10" :
+              op.kind === "add" ? "bg-green-500/10" :
+                                  "";
+            const sign =
+              op.kind === "del" ? "−" :
+              op.kind === "add" ? "+" : " ";
+            const text =
+              op.kind === "del" ? op.left :
+              op.kind === "add" ? op.right :
+                                  op.left;
+            const align =
+              op.kind === "del" ? "text-red-500"   :
+              op.kind === "add" ? "text-green-500" :
+                                  "text-t-ink3";
+            return (
+              <div key={i} className={`grid grid-cols-2 gap-px ${bg}`}>
+                <div className={`px-3 py-0.5 whitespace-pre-wrap break-all ${op.kind === "add" ? "text-t-ink5" : align}`}>
+                  {op.kind !== "add" ? <><span className="text-t-ink5">{sign} </span>{text}</> : <span className="text-t-ink5">{"  "}</span>}
+                </div>
+                <div className={`px-3 py-0.5 whitespace-pre-wrap break-all ${op.kind === "del" ? "text-t-ink5" : align}`}>
+                  {op.kind !== "del" ? <><span className="text-t-ink5">{sign} </span>{text}</> : <span className="text-t-ink5">{"  "}</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="shrink-0 px-3 py-1.5 border-t border-t-line bg-t-panel flex items-center text-[10px] text-t-ink5">
+          <span>JSON / XML pretty-printed before diffing so structural changes align by line.</span>
+          <span className="ml-auto flex items-center gap-1">
+            <kbd className="font-mono px-1 py-0.5 border border-t-line rounded">Esc</kbd> close
+          </span>
+        </div>
       </div>
     </div>
   );

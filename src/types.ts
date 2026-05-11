@@ -18,6 +18,12 @@ export interface Profile {
    *  section headers in the header profile picker and Cmd+K palette.
    *  Empty / missing falls back to "Default". */
   workspace?: string;
+
+  // Reconnect-backoff tuning for the subscriber attached to this profile.
+  // Defaults if missing: base=1000 ms, max=30000 ms, multiplier=2.
+  reconnect_base_ms?: number;
+  reconnect_max_ms?: number;
+  reconnect_multiplier?: number;
 }
 
 export interface SendResult {

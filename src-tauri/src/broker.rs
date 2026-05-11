@@ -151,6 +151,23 @@ pub async fn list_queues_via(channel: &mut ManagementChannel) -> Result<Vec<Brok
 /// Permanently delete every message currently sitting in the queue. Returns
 /// the number of messages that were removed (Artemis reports this from
 /// `removeAllMessages`). Destructive — caller must confirm with the user.
+/// Measure round-trip latency to the broker via a trivial management RPC
+/// (broker.getName). Returns milliseconds. Used by the header's "broker
+/// latency" indicator to surface degrading network / broker conditions
+/// before a send/recv stalls.
+pub async fn ping_via(channel: &mut ManagementChannel) -> Result<u64, String> {
+    let started = std::time::Instant::now();
+    invoke_management::<String>(
+        &mut channel.sender,
+        &mut channel.receiver,
+        &channel.reply_to,
+        "broker",
+        "getName",
+        Body::Value(AmqpValue(Value::String("[]".into()))),
+    ).await?;
+    Ok(started.elapsed().as_millis() as u64)
+}
+
 pub async fn purge_queue_via(channel: &mut ManagementChannel, queue: &str) -> Result<i64, String> {
     invoke_management::<i64>(
         &mut channel.sender,

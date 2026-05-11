@@ -54,6 +54,18 @@ pub struct Profile {
     #[serde(default = "default_workspace")]
     pub workspace: String,
 
+    // ── Reconnect-backoff tuning (subscriber loop) ─────────────────────
+    // Wait base ms after the first failure; double on each subsequent
+    // failure (×multiplier); cap at max_ms. Defaults match the previous
+    // hardcoded behaviour so existing profiles see no change. Users with
+    // long broker outages can crank max_ms way up to avoid log flood.
+    #[serde(default = "default_reconnect_base_ms")]
+    pub reconnect_base_ms: u64,
+    #[serde(default = "default_reconnect_max_ms")]
+    pub reconnect_max_ms: u64,
+    #[serde(default = "default_reconnect_multiplier")]
+    pub reconnect_multiplier: f64,
+
     /// Catch-all for fields not modelled here. Without it, hand-edited custom
     /// keys (or fields from a newer AMQPush version) would be silently dropped
     /// on the first `save_profile`. With `#[serde(flatten)]` they ride
@@ -64,6 +76,9 @@ pub struct Profile {
 
 fn default_connect_timeout() -> u32 { 10 }
 fn default_workspace() -> String { "Default".into() }
+fn default_reconnect_base_ms() -> u64 { 1_000 }
+fn default_reconnect_max_ms() -> u64 { 30_000 }
+fn default_reconnect_multiplier() -> f64 { 2.0 }
 
 impl Default for Profile {
     fn default() -> Self {
@@ -82,6 +97,9 @@ impl Default for Profile {
             tls_skip_verify: false,
             sasl_anonymous: false,
             workspace: default_workspace(),
+            reconnect_base_ms: default_reconnect_base_ms(),
+            reconnect_max_ms: default_reconnect_max_ms(),
+            reconnect_multiplier: default_reconnect_multiplier(),
             extra: HashMap::new(),
         }
     }

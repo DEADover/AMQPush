@@ -55,6 +55,12 @@ async fn connect(
     connect_timeout_secs: Option<u32>,
     sasl_anonymous: Option<bool>,
     tls_skip_verify: Option<bool>,
+    // Reconnect-backoff settings — all optional so older callers (and the
+    // command palette's "connect" action) still work. Subscribers attached
+    // to this client read these on each reconnect.
+    reconnect_base_ms: Option<u64>,
+    reconnect_max_ms: Option<u64>,
+    reconnect_multiplier: Option<f64>,
 ) -> Result<(), String> {
     {
         let mut client = state.client.lock().await;
@@ -73,6 +79,9 @@ async fn connect(
                 tls_skip_verify.unwrap_or(false),
             )
             .await?;
+        client.reconnect_base_ms = reconnect_base_ms.unwrap_or(1_000);
+        client.reconnect_max_ms = reconnect_max_ms.unwrap_or(30_000);
+        client.reconnect_multiplier = reconnect_multiplier.unwrap_or(2.0);
     }
 
     // Spawn the notifications drainer so internal broker events
@@ -223,7 +232,7 @@ async fn start_subscriber(
         return Err("Queue address is required".into());
     }
 
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, base_ms, max_ms, mult) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected to broker".into());
@@ -235,6 +244,9 @@ async fn start_subscriber(
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.reconnect_base_ms,
+            client.reconnect_max_ms,
+            client.reconnect_multiplier,
         )
     };
 
@@ -247,8 +259,12 @@ async fn start_subscriber(
         }
     }
 
-    let handle =
-        subscriber::start(&host, port, addr.clone(), &username, &password, use_tls, tls_skip_verify, selector, app).await?;
+    let handle = subscriber::start(
+        &host, port, addr.clone(), &username, &password,
+        use_tls, tls_skip_verify, selector,
+        base_ms, max_ms, mult,
+        app,
+    ).await?;
 
     let mut subs = state.subs.lock().await;
     subs.insert(addr, handle);
@@ -399,6 +415,44 @@ async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<Bro
         Ok(list) => Ok(list),
         Err(e) => {
             // Channel may be in a bad state — close it so next call re-opens fresh
+            if let Some(c) = mgmt_guard.take() {
+                c.close().await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Round-trip latency probe against the broker — issues a trivial
+/// management RPC and returns milliseconds. Used by the header's live
+/// latency indicator. Reuses the same management channel as the queue
+/// list so a healthy refresh / ping costs the broker effectively nothing.
+#[tauri::command]
+async fn ping_broker(state: tauri::State<'_, AppState>) -> Result<u64, String> {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
+        let client = state.client.lock().await;
+        if !client.is_connected() {
+            return Err("Not connected".into());
+        }
+        (
+            client.host.clone(),
+            client.port,
+            client.username.clone(),
+            client.password.clone(),
+            client.use_tls,
+            client.tls_skip_verify,
+        )
+    };
+
+    let mut mgmt_guard = state.mgmt.lock().await;
+    if mgmt_guard.is_none() {
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        *mgmt_guard = Some(chan);
+    }
+    let chan = mgmt_guard.as_mut().expect("just opened");
+    match broker::ping_via(chan).await {
+        Ok(ms) => Ok(ms),
+        Err(e) => {
             if let Some(c) = mgmt_guard.take() {
                 c.close().await;
             }
@@ -702,6 +756,7 @@ pub fn run() {
             list_broker_queues,
             peek_messages,
             purge_queue,
+            ping_broker,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -14,6 +14,7 @@ import { fmtBytes, fmtDuration } from "../../utils/format";
 import Ajv, { ErrorObject } from "ajv";
 import CodeEditor, { VariableSuggestion } from "../CodeEditor";
 import TokenInput from "../TokenInput";
+import Sparkline from "../Sparkline";
 import Tabs, { TabItem } from "../Tabs";
 import ViewTopBar from "../ViewTopBar";
 import EmptyState from "../EmptyState";
@@ -221,7 +222,42 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
   const [csvDryRunIdx,  setCsvDryRunIdx]  = useState(0);
   const [csvDelay,    setCsvDelay]    = useState("0");
   const [csvProgress, setCsvProgress] = useState<{ done: number; total: number; ok: number; failed: number } | null>(null);
+  /** Per-second throughput sample bucket for the live sparkline. Pushed once
+   *  per wall-clock second from the send loop; resets between runs. Capped
+   *  at 60 samples so a long batch doesn't grow this unboundedly. */
+  const [sendRateHistory, setSendRateHistory] = useState<number[]>([]);
+  /** Sampler state — current second and count of sends in it. We bucket
+   *  per second instead of using a moving window for simplicity; one
+   *  data point per second is plenty for a 120-px wide sparkline. */
+  const sampleRef = useRef<{ secondKey: number; countInSecond: number }>({ secondKey: 0, countInSecond: 0 });
   const csvAbortRef = useRef<AbortController | null>(null);
+
+  /** Call once after each successful send. Bucks sends into per-second
+   *  totals and pushes the previous second's total into history when the
+   *  wall-clock second flips. */
+  function sampleSend() {
+    const sec = Math.floor(Date.now() / 1000);
+    if (sampleRef.current.secondKey === 0) {
+      sampleRef.current.secondKey = sec;
+    } else if (sec !== sampleRef.current.secondKey) {
+      // Bucket the previous second; carry zero-rate gaps for skipped seconds.
+      const gap = Math.max(0, sec - sampleRef.current.secondKey - 1);
+      setSendRateHistory(prev => {
+        const next = [...prev, sampleRef.current.countInSecond];
+        for (let i = 0; i < gap; i++) next.push(0);
+        return next.slice(-60);
+      });
+      sampleRef.current.secondKey = sec;
+      sampleRef.current.countInSecond = 0;
+    }
+    sampleRef.current.countInSecond++;
+  }
+
+  /** Reset sampler + history. Call at the start of every batch / CSV run. */
+  function resetSampler() {
+    sampleRef.current = { secondKey: 0, countInSecond: 0 };
+    setSendRateHistory([]);
+  }
   const csvFileInputRef = useRef<HTMLInputElement>(null);
   /** True while a file is being dragged over the CSV dropzone — drives the
    *  visual feedback. */
@@ -680,6 +716,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     let ok = 0;
     let failed = 0;
     setCsvProgress({ done: 0, total, ok: 0, failed: 0 });
+    resetSampler();
 
     const startedAt = Date.now();
     let totalBytes = 0;
@@ -731,6 +768,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           });
           ok++;
           totalBytes += new TextEncoder().encode(body).length;
+          sampleSend();
           if (i < 5 || i === total - 1) {
             onLog("ok", `CSV row ${i + 1}/${total} → ${result.address}  |  ${result.message_id}`);
           }
@@ -786,6 +824,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
     setLastSend(null);
     setRrReply(null);
     setRrTimedOut(false);
+    resetSampler();
 
     // ── Schedule (delayed start) ────────────────────────────────────────
     // Wrap the send in an AbortController so the user can cancel the
@@ -868,6 +907,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           mode === "raw" && resolvedText ? new TextEncoder().encode(resolvedText).length :
           mode === "binary" ? (file?.size ?? 0) : 0;
         totalBytes += bytes;
+        sampleSend();
         onLog("ok", `Sent → ${result.address}  |  ${result.message_id}  |  ${result.timestamp}`);
       }
       // Determine kind for stats: "json"/"xml"/"text" for raw, "binary" for files, "none" otherwise
@@ -1689,6 +1729,22 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                                   {csvProgress.failed > 0 && (
                                     <span className="text-red-500 text-[11px] font-mono">{csvProgress.failed} fail</span>
                                   )}
+                                  {sendRateHistory.length > 0 && (
+                                    <>
+                                      <Sparkline
+                                        values={sendRateHistory}
+                                        width={96}
+                                        height={14}
+                                        color="rgb(var(--t-ink3))"
+                                        fillColor="rgb(var(--t-ink4) / 0.18)"
+                                        title="Sends per second (last 60s)"
+                                        className="ml-auto"
+                                      />
+                                      <span className="text-[10px] text-t-ink5 font-mono shrink-0">
+                                        {sendRateHistory[sendRateHistory.length - 1]}/s
+                                      </span>
+                                    </>
+                                  )}
                                 </div>
                                 <div className="mt-1 h-1.5 rounded-full bg-t-line overflow-hidden">
                                   <div
@@ -2068,6 +2124,21 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                   style={{ width: `${(progress.current / progress.total) * 100}%` }}
                 />
               </div>
+            )}
+            {progress.total > 1 && sendRateHistory.length > 0 && (
+              <>
+                <Sparkline
+                  values={sendRateHistory}
+                  width={80}
+                  height={12}
+                  color="rgb(var(--t-ink3))"
+                  fillColor="rgb(var(--t-ink4) / 0.18)"
+                  title="Sends per second (last 60s)"
+                />
+                <span className="text-[10px] text-t-ink5 font-mono">
+                  {sendRateHistory[sendRateHistory.length - 1]}/s
+                </span>
+              </>
             )}
             {progress.total > 1 && (
               <button

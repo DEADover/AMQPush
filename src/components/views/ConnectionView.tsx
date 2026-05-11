@@ -28,6 +28,12 @@ export interface ConnForm {
 
   /** Workspace / grouping label. Empty resolves to "Default". */
   workspace: string;
+
+  // Reconnect backoff (subscriber). String-typed for the form; parsed
+  // to numbers on save / connect. Empty → backend defaults.
+  reconnectBaseMs: string;
+  reconnectMaxMs: string;
+  reconnectMultiplier: string;
 }
 
 interface Props {
@@ -62,6 +68,9 @@ const DEFAULTS: ConnForm = {
   tlsSkipVerify: false,
   saslAnonymous: false,
   workspace: "Default",
+  reconnectBaseMs: "1000",
+  reconnectMaxMs: "30000",
+  reconnectMultiplier: "2",
 };
 
 // Heuristic: which log entries are "connection-related" — to filter the activity panel
@@ -79,6 +88,7 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
   // Form value shorthands — pull from props
   const { host, port, username, password, queue, useTls } = form;
   const { containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace } = form;
+  const { reconnectBaseMs, reconnectMaxMs, reconnectMultiplier } = form;
   const setHost     = (v: string) => setForm(f => ({ ...f, host: v }));
   const setPort     = (v: string) => setForm(f => ({ ...f, port: v }));
   const setUsername = (v: string) => setForm(f => ({ ...f, username: v }));
@@ -91,6 +101,9 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
   const setTlsSkipVerify      = (v: boolean) => setForm(f => ({ ...f, tlsSkipVerify: v }));
   const setSaslAnonymous      = (v: boolean) => setForm(f => ({ ...f, saslAnonymous: v }));
   const setWorkspace          = (v: string)  => setForm(f => ({ ...f, workspace: v }));
+  const setReconnectBaseMs    = (v: string)  => setForm(f => ({ ...f, reconnectBaseMs: v }));
+  const setReconnectMaxMs     = (v: string)  => setForm(f => ({ ...f, reconnectMaxMs: v }));
+  const setReconnectMult      = (v: string)  => setForm(f => ({ ...f, reconnectMultiplier: v }));
 
   // Existing workspace labels (deduped) — used as datalist suggestions in the
   // workspace input. Always includes "Default" so the user has at least one
@@ -146,6 +159,9 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       tlsSkipVerify:      p.tls_skip_verify ?? false,
       saslAnonymous:      p.sasl_anonymous ?? false,
       workspace:          (p.workspace ?? "").trim() || "Default",
+      reconnectBaseMs:    p.reconnect_base_ms !== undefined ? String(p.reconnect_base_ms) : "1000",
+      reconnectMaxMs:     p.reconnect_max_ms !== undefined ? String(p.reconnect_max_ms) : "30000",
+      reconnectMultiplier: p.reconnect_multiplier !== undefined ? String(p.reconnect_multiplier) : "2",
     });
   }
 
@@ -175,9 +191,13 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
         || (loaded.connect_timeout_secs ?? 10) !== (Number(connectTimeoutSecs) || 0)
         || (loaded.tls_skip_verify ?? false) !== tlsSkipVerify
         || (loaded.sasl_anonymous ?? false) !== saslAnonymous
-        || ((loaded.workspace ?? "").trim() || "Default") !== (workspace.trim() || "Default");
+        || ((loaded.workspace ?? "").trim() || "Default") !== (workspace.trim() || "Default")
+        || (loaded.reconnect_base_ms ?? 1000) !== (Number(reconnectBaseMs) || 1000)
+        || (loaded.reconnect_max_ms ?? 30000) !== (Number(reconnectMaxMs) || 30000)
+        || (loaded.reconnect_multiplier ?? 2) !== (Number(reconnectMultiplier) || 2);
   }, [loaded, host, port, username, password, queue, useTls,
-      containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace]);
+      containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace,
+      reconnectBaseMs, reconnectMaxMs, reconnectMultiplier]);
 
   function buildProfile(name: string): Profile {
     return {
@@ -194,6 +214,9 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       tls_skip_verify: tlsSkipVerify,
       sasl_anonymous: saslAnonymous,
       workspace: workspace.trim() || "Default",
+      reconnect_base_ms: Math.max(0, Number(reconnectBaseMs) || 1000),
+      reconnect_max_ms: Math.max(0, Number(reconnectMaxMs) || 30000),
+      reconnect_multiplier: Math.max(1.01, Number(reconnectMultiplier) || 2),
     };
   }
 
@@ -277,6 +300,10 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
         heartbeatSecs:      Number(heartbeatSecs) || 0,
         connectTimeoutSecs: Number(connectTimeoutSecs) || 0,
         saslAnonymous,
+        tlsSkipVerify,
+        reconnectBaseMs:    Math.max(0, Number(reconnectBaseMs) || 1000),
+        reconnectMaxMs:     Math.max(0, Number(reconnectMaxMs) || 30000),
+        reconnectMultiplier: Math.max(1.01, Number(reconnectMultiplier) || 2),
       });
       onConnected(queue);
       onLog("ok", `Connected → ${host}:${port}${queue ? `  (${queue})` : ""}`);
@@ -588,6 +615,52 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
             <p className="text-[10px] text-t-ink5 leading-relaxed">
               <strong className="text-t-ink4">Heartbeat</strong> sends idle keepalive frames every N seconds — useful when a firewall/NAT closes idle TCP connections. Most brokers default to 30s.<br/>
               <strong className="text-t-ink4">Connect timeout</strong> aborts the initial connection attempt if it takes longer than N seconds. 0 disables the timeout.
+            </p>
+          </div>
+        </div>
+
+        {/* Reconnect backoff — used by subscribers when the broker drops the
+            link. Each step waits backoff_ms, then multiplies by the
+            multiplier, capped at max. Bigger ceilings save log volume during
+            long outages; small starting delays react fast on flaky networks. */}
+        <div className="mb-4">
+          <SectionLabel className="block mb-2">Subscriber reconnect backoff</SectionLabel>
+          <div className="bg-t-card border border-t-line rounded-lg p-3 space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className={LABEL}>
+                  Initial delay
+                  <span className="text-t-ink5 normal-case font-normal"> — ms</span>
+                </label>
+                <input type="number" min="0" value={reconnectBaseMs}
+                  onChange={e => setReconnectBaseMs(e.target.value)}
+                  placeholder="1000" className={INPUT} />
+              </div>
+              <div>
+                <label className={LABEL}>
+                  Maximum delay
+                  <span className="text-t-ink5 normal-case font-normal"> — ms</span>
+                </label>
+                <input type="number" min="0" value={reconnectMaxMs}
+                  onChange={e => setReconnectMaxMs(e.target.value)}
+                  placeholder="30000" className={INPUT} />
+              </div>
+              <div>
+                <label className={LABEL}>
+                  Multiplier
+                  <span className="text-t-ink5 normal-case font-normal"> — per step</span>
+                </label>
+                <input type="number" min="1.01" step="0.1" value={reconnectMultiplier}
+                  onChange={e => setReconnectMult(e.target.value)}
+                  placeholder="2" className={INPUT} />
+              </div>
+            </div>
+            <p className="text-[10px] text-t-ink5 leading-relaxed">
+              Subscriber waits <strong className="text-t-ink4">initial delay</strong> after a failed
+              receive, then multiplies by <strong className="text-t-ink4">multiplier</strong> on each
+              subsequent failure, capped at <strong className="text-t-ink4">maximum delay</strong>.
+              Resets to initial on the first successful message. Defaults: 1000 / 30000 / 2 — same as
+              before the field existed.
             </p>
           </div>
         </div>

@@ -64,6 +64,12 @@ pub struct AmqpClient {
     container_id: String,
     sasl_anonymous: bool,
     heartbeat_secs: u32,
+
+    // Reconnect backoff for subscribers attached to this client. Stored
+    // here so start_subscriber can pull them without re-reading the profile.
+    pub reconnect_base_ms: u64,
+    pub reconnect_max_ms: u64,
+    pub reconnect_multiplier: f64,
 }
 
 /// Heuristic detection of "session/connection got reset" errors from
@@ -172,6 +178,9 @@ impl AmqpClient {
             container_id: String::new(),
             sasl_anonymous: false,
             heartbeat_secs: 0,
+            reconnect_base_ms: 1_000,
+            reconnect_max_ms: 30_000,
+            reconnect_multiplier: 2.0,
         }
     }
 

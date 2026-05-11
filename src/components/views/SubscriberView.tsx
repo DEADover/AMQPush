@@ -18,6 +18,7 @@ import ViewTopBar from "../ViewTopBar";
 import ConfirmDialog from "../ConfirmDialog";
 import { fmtBytes, fmtDuration, csvEscape } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
+import { diffLines } from "../../utils/diff";
 
 interface ReplyArg {
   address: string;
@@ -1215,38 +1216,7 @@ function RulesModal({ rules, onChange, onClose }: {
 }
 
 // ── diff modal ──────────────────────────────────────────────────────────────
-
-/**
- * Simple line-by-line diff via Longest Common Subsequence (LCS). For body
- * comparison only — properties get a per-key diff in the table view.
- *
- * Returns operations: "eq" (line in both), "del" (only in left), "add" (only
- * in right). We use a O(n*m) DP over lines which is fine for typical message
- * payloads.
- */
-type DiffOp = { kind: "eq" | "del" | "add"; left?: string; right?: string };
-function diffLines(a: string, b: string): DiffOp[] {
-  const la = a.split("\n");
-  const lb = b.split("\n");
-  const n = la.length, m = lb.length;
-  // DP table
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = la[i] === lb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const ops: DiffOp[] = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (la[i] === lb[j]) { ops.push({ kind: "eq", left: la[i], right: lb[j] }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ kind: "del", left: la[i] }); i++; }
-    else { ops.push({ kind: "add", right: lb[j] }); j++; }
-  }
-  while (i < n) { ops.push({ kind: "del", left: la[i++] }); }
-  while (j < m) { ops.push({ kind: "add", right: lb[j++] }); }
-  return ops;
-}
+// (diffLines is shared with HistoryView's compare flow — see utils/diff.ts)
 
 function DiffModal({ left, right, onClose }: { left: ReceivedMessage; right: ReceivedMessage; onClose: () => void }) {
   // Properties diff — collect union of keys, mark equal/different/only-left/only-right

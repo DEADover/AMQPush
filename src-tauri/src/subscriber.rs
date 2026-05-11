@@ -116,6 +116,11 @@ struct SubParams {
     /// JMS-style selector (e.g. `priority > 5`). Empty / whitespace = no filter,
     /// receiver attaches with no source filter (broker delivers everything).
     selector: String,
+    /// Reconnect-backoff tuning: starting delay, ceiling, multiplier per step.
+    /// Defaults if zero / negative pass-through preserve old behaviour.
+    backoff_base_ms: u64,
+    backoff_max_ms: u64,
+    backoff_multiplier: f64,
 }
 
 async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connection::ConnectionHandle<()>, fe2o3_amqp::session::SessionHandle<()>), String> {
@@ -169,6 +174,9 @@ pub async fn start(
     use_tls: bool,
     tls_skip_verify: bool,
     selector: String,
+    backoff_base_ms: u64,
+    backoff_max_ms: u64,
+    backoff_multiplier: f64,
     app: AppHandle,
 ) -> Result<SubscriberHandle, String> {
     let params = SubParams {
@@ -180,6 +188,11 @@ pub async fn start(
         use_tls,
         tls_skip_verify,
         selector,
+        // Defensive defaults — if a caller passes 0 / negative / NaN we want
+        // working values, not a no-op loop.
+        backoff_base_ms: if backoff_base_ms == 0 { 1_000 } else { backoff_base_ms },
+        backoff_max_ms: if backoff_max_ms == 0 { 30_000 } else { backoff_max_ms },
+        backoff_multiplier: if backoff_multiplier > 1.0 && backoff_multiplier.is_finite() { backoff_multiplier } else { 2.0 },
     };
 
     // Initial connection attempt (fail fast, surface error to UI)
@@ -201,13 +214,14 @@ async fn run_loop(
     queue: String,
 ) {
     const MAX_BODY_LEN: usize = 4096;
-    const MAX_BACKOFF_MS: u64 = 30_000;
-    let mut backoff_ms: u64 = 1_000;
+    let max_backoff_ms = params.backoff_max_ms;
+    let backoff_multiplier = params.backoff_multiplier;
+    let mut backoff_ms: u64 = params.backoff_base_ms;
 
     loop {
         match receiver.recv::<Body<Value>>().await {
             Ok(delivery) => {
-                backoff_ms = 1_000; // reset on successful receive
+                backoff_ms = params.backoff_base_ms; // reset on successful receive
 
                 let meta = extract_peeked(&delivery);
 
@@ -269,7 +283,8 @@ async fn run_loop(
                     message: Some(backoff_ms.to_string()),
                 }).ok();
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                let next = (backoff_ms as f64 * backoff_multiplier) as u64;
+                backoff_ms = next.min(max_backoff_ms);
 
                 // Try to reconnect
                 match open_connection(&params).await {

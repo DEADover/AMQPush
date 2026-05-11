@@ -138,6 +138,9 @@ export default function App() {
     tlsSkipVerify: false,
     saslAnonymous: false,
     workspace: "Default",
+    reconnectBaseMs: "1000",
+    reconnectMaxMs: "30000",
+    reconnectMultiplier: "2",
   });
 
   // Track previous view to support Cmd+L toggle
@@ -262,6 +265,27 @@ export default function App() {
 
   useEffect(() => { loadProfiles(); }, []);
 
+  // Broker-latency polling. Runs while connected, hits ping_broker every
+  // 5 s. Cheapest possible management RPC (broker.getName) — reuses the
+  // long-lived ManagementChannel, so a healthy ping costs the broker
+  // effectively zero. Failure clears the indicator; the next attempt will
+  // try to reopen the channel automatically.
+  useEffect(() => {
+    if (!connected) { setBrokerLatencyMs(null); return; }
+    let cancelled = false;
+    async function probe() {
+      try {
+        const ms = await invoke<number>("ping_broker");
+        if (!cancelled) setBrokerLatencyMs(ms);
+      } catch {
+        if (!cancelled) setBrokerLatencyMs(null);
+      }
+    }
+    probe();
+    const interval = setInterval(probe, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [connected]);
+
   function applyProfile(p: Profile) {
     setConnForm({
       host: p.host,
@@ -276,6 +300,9 @@ export default function App() {
       tlsSkipVerify:      p.tls_skip_verify ?? false,
       saslAnonymous:      p.sasl_anonymous ?? false,
       workspace:          (p.workspace ?? "").trim() || "Default",
+      reconnectBaseMs:    p.reconnect_base_ms !== undefined ? String(p.reconnect_base_ms) : "1000",
+      reconnectMaxMs:     p.reconnect_max_ms !== undefined ? String(p.reconnect_max_ms) : "30000",
+      reconnectMultiplier: p.reconnect_multiplier !== undefined ? String(p.reconnect_multiplier) : "2",
     });
     setActiveProfile(p.name);
   }
@@ -320,6 +347,10 @@ export default function App() {
           heartbeatSecs: target.heartbeat_secs ?? 0,
           connectTimeoutSecs: target.connect_timeout_secs ?? 10,
           saslAnonymous: target.sasl_anonymous ?? false,
+          tlsSkipVerify: target.tls_skip_verify ?? false,
+          reconnectBaseMs: target.reconnect_base_ms ?? 1000,
+          reconnectMaxMs: target.reconnect_max_ms ?? 30000,
+          reconnectMultiplier: target.reconnect_multiplier ?? 2,
         });
         handleConnected(target.queue);
         addLog("ok", `Auto-connected → ${target.host}:${target.port}${target.queue ? `  (${target.queue})` : ""}  via '${target.name}'`);
@@ -344,6 +375,10 @@ export default function App() {
    *  tab jumps to "CSV bulk send" instead of dropping the user on the
    *  generic Send page). Updated via PublisherView's onTabChange. */
   const [pubTab, setPubTab] = useState<string>("body");
+  /** Latest broker round-trip latency in ms. `null` when we haven't probed
+   *  yet (or the broker isn't reachable). Refreshed every 5s by the polling
+   *  effect below — surfaces in the header next to the Connected dot. */
+  const [brokerLatencyMs, setBrokerLatencyMs] = useState<number | null>(null);
   /** Confirm dialog before wiping the log buffer via the Cmd+K palette.
    *  ConsoleView's in-view Clear button has its own confirm; this one is
    *  the parallel for the palette path so both routes are gated. */
@@ -461,12 +496,27 @@ export default function App() {
             </DropdownFooter>
           </Dropdown>
 
-          {/* Connection status */}
+          {/* Connection status. When connected, the green dot is followed by
+              a live latency chip — broker round-trip every 5 s via the
+              cheapest possible management RPC. Visible degradation in network
+              or broker health surfaces immediately, before sends/recvs stall. */}
           <div className="flex items-center gap-1.5 px-2">
             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${connected ? "bg-green-500" : "bg-t-ink5"}`} />
             <span className={`text-[11px] font-medium hidden sm:inline ${connected ? "text-green-500" : "text-t-ink4"}`}>
               {connected ? "Connected" : "Not connected"}
             </span>
+            {connected && brokerLatencyMs !== null && (
+              <span
+                className={`text-[11px] font-mono ${
+                  brokerLatencyMs < 100 ? "text-t-ink4"
+                  : brokerLatencyMs < 500 ? "text-amber-500"
+                  : "text-red-500"
+                }`}
+                title={`Broker round-trip latency (refreshed every 5 s)`}
+              >
+                {brokerLatencyMs}ms
+              </span>
+            )}
           </div>
         </div>
 
