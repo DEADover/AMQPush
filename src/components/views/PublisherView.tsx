@@ -1855,10 +1855,10 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                     <tr className="text-[10px] uppercase tracking-wider text-t-ink4 font-semibold">
                       <th className="px-3 py-2 text-left font-semibold">Name</th>
                       <th className="px-2 py-2 text-left font-semibold">Address</th>
-                      <th className="px-2 py-2 text-center font-semibold">Kind</th>
-                      <th className="px-2 py-2 text-right font-semibold">Size</th>
-                      <th className="px-2 py-2 text-right font-semibold" title="Number of custom application-properties">Props</th>
-                      <th className="px-2 py-2 text-center font-semibold" title="Configuration flags set on this template — batch send, schedule, request-reply, pre-script, body validation schema, user-defined variables">Features</th>
+                      <th className="px-2 py-2 text-left font-semibold">Kind</th>
+                      <th className="px-2 py-2 text-left font-semibold">Size</th>
+                      <th className="px-2 py-2 text-left font-semibold" title="Number of custom application-properties">Props</th>
+                      <th className="px-2 py-2 text-left font-semibold" title="Configuration flags set on this template — batch send, schedule, request-reply, pre-script, body validation schema, user-defined variables">Features</th>
                       <th className="px-2 py-2" aria-label="Actions" />
                     </tr>
                   </thead>
@@ -1946,20 +1946,20 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                               {tpl.address || <span className="italic text-t-ink5">—</span>}
                             </span>
                           </td>
-                          <td className="px-2 align-middle text-center">
+                          <td className="px-2 align-middle">
                             <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded font-mono font-medium uppercase ${kindClass}`}>
                               {kind}
                             </span>
                           </td>
-                          <td className="px-2 align-middle text-right text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
-                          <td className="px-2 align-middle text-right text-t-ink4 font-mono">
+                          <td className="px-2 align-middle text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
+                          <td className="px-2 align-middle text-t-ink4 font-mono">
                             {propsCount > 0 ? propsCount : <span className="text-t-ink5">—</span>}
                           </td>
                           <td className="px-2 align-middle">
                             {/* Icon-only flag row. Order is stable so the
                                 same feature always sits in the same column
                                 across rows, making the table scannable. */}
-                            <div className="flex items-center justify-center gap-2 text-t-ink5">
+                            <div className="flex items-center justify-start gap-2 text-t-ink5">
                               <FeatureFlag
                                 on={batchOn}
                                 icon={<Repeat2 className="w-3.5 h-3.5" />}
@@ -1999,7 +1999,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                               />
                             </div>
                           </td>
-                          <td className="px-2 align-middle text-right whitespace-nowrap">
+                          <td className="px-2 align-middle whitespace-nowrap">
                             <button
                               onClick={(e) => { e.stopPropagation(); setRenamingTpl(tpl.name); setRenamingDraft(tpl.name); }}
                               title="Rename template"
