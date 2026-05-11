@@ -1844,11 +1844,10 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                 <table className="w-full text-[12px] table-fixed">
                   <colgroup>
                     <col className="w-[24%]" />{/* Name */}
-                    <col className="w-[22%]" />{/* Address */}
-                    <col className="w-[64px]" />{/* Kind */}
+                    <col className="w-[24%]" />{/* Address */}
+                    <col className="w-[60px]" />{/* Kind */}
                     <col className="w-[72px]" />{/* Size */}
-                    <col className="w-[64px]" />{/* Props */}
-                    <col className="w-[200px]" />{/* Features */}
+                    <col className="w-[220px]" />{/* Features */}
                     <col className="w-[64px]" />{/* Actions */}
                   </colgroup>
                   <thead className="sticky top-0 bg-t-panel border-b border-t-line z-10">
@@ -1857,8 +1856,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       <th className="px-2 py-2 text-left font-semibold">Address</th>
                       <th className="px-2 py-2 text-left font-semibold">Kind</th>
                       <th className="px-2 py-2 text-left font-semibold">Size</th>
-                      <th className="px-2 py-2 text-left font-semibold" title="Number of custom application-properties">Props</th>
-                      <th className="px-2 py-2 text-left font-semibold" title="Configuration flags set on this template — batch send, schedule, request-reply, pre-script, body validation schema, user-defined variables">Features</th>
+                      <th className="px-2 py-2 text-left font-semibold" title="Configuration flags set on this template — custom properties, batch send, schedule, request-reply, pre-script, body validation schema, user-defined variables">Features</th>
                       <th className="px-2 py-2" aria-label="Actions" />
                     </tr>
                   </thead>
@@ -1887,10 +1885,14 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                         || (tpl.body_schema_xsd && tpl.body_schema_xsd.trim())
                         || (tpl.body_schema && tpl.body_schema.trim()));
                       const userVarsCount = tpl.user_vars?.length ?? 0;
-                      const kindClass =
-                        kind === "json" ? "bg-blue-500/15 text-blue-500" :
-                        kind === "xml"  ? "bg-violet-500/15 text-violet-500" :
-                                          "bg-t-hover text-t-ink3";
+                      // Plain text colour for the Kind column — no chip
+                      // background. JSON / XML stay tinted so the body
+                      // subtype is still scannable; text falls back to
+                      // the default ink colour.
+                      const kindColor =
+                        kind === "json" ? "text-blue-500" :
+                        kind === "xml"  ? "text-violet-500" :
+                                          "text-t-ink3";
 
                       // Renaming mode — render a single full-width row that
                       // captures the input + Save/Cancel; spans all columns
@@ -1898,7 +1900,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       if (isRenaming) {
                         return (
                           <tr key={tpl.name} className="border-b border-t-line/40 bg-blue-500/5">
-                            <td colSpan={7} className="px-3 py-1.5">
+                            <td colSpan={6} className="px-3 py-1.5">
                               <div className="flex items-center gap-2">
                                 <input
                                   autoFocus
@@ -1947,19 +1949,23 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                             </span>
                           </td>
                           <td className="px-2 align-middle">
-                            <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded font-mono font-medium uppercase ${kindClass}`}>
+                            <span className={`text-[11px] font-mono font-medium uppercase ${kindColor}`}>
                               {kind}
                             </span>
                           </td>
                           <td className="px-2 align-middle text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
-                          <td className="px-2 align-middle text-t-ink4 font-mono">
-                            {propsCount > 0 ? propsCount : <span className="text-t-ink5">—</span>}
-                          </td>
                           <td className="px-2 align-middle">
                             {/* Icon-only flag row. Order is stable so the
                                 same feature always sits in the same column
                                 across rows, making the table scannable. */}
                             <div className="flex items-center justify-start gap-2 text-t-ink5">
+                              <FeatureFlag
+                                on={propsCount > 0}
+                                icon={<Tag className="w-3.5 h-3.5" />}
+                                color="text-t-ink2"
+                                title={propsCount > 0 ? `${propsCount} custom application-propert${propsCount === 1 ? "y" : "ies"}` : "No custom properties"}
+                                badge={propsCount > 0 ? propsCount : undefined}
+                              />
                               <FeatureFlag
                                 on={batchOn}
                                 icon={<Repeat2 className="w-3.5 h-3.5" />}
