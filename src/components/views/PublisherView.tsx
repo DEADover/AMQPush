@@ -1215,9 +1215,12 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
               {/* Column headers */}
               <div className="sticky top-0 z-10 grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel">
                 <div></div>
-                <SectionLabel>Key</SectionLabel>
-                <SectionLabel>Value</SectionLabel>
-                <SectionLabel>Description</SectionLabel>
+                {/* Header labels match the row inputs' inner padding (px-1.5)
+                    so KEY / VALUE / DESCRIPTION line up with the placeholder
+                    text below, not 6 px to the left of it. */}
+                <SectionLabel className="px-1.5">Key</SectionLabel>
+                <SectionLabel className="px-1.5">Value</SectionLabel>
+                <SectionLabel className="px-1.5">Description</SectionLabel>
                 <div></div>
               </div>
 
@@ -1249,7 +1252,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       value={row.value}
                       onChange={v => updateProp(row.id, "value", v)}
                       suggestions={variableSuggestions}
-                      placeholder="value (supports {{tokens}})"
+                      placeholder="value (support vars)"
                       className="w-full text-[12px] py-1.5 px-1.5 rounded hover:bg-t-card focus-within:bg-t-field focus-within:ring-1 focus-within:ring-blue-500/30"
                     />
                     <input value={row.description ?? ""} onChange={e => updateProp(row.id, "description", e.target.value)}
@@ -1319,9 +1322,12 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
               {/* Column headers */}
               <div className="sticky top-0 z-10 grid grid-cols-[28px_1fr_1fr_1fr_28px] items-center gap-2 px-3 py-1.5 border-b border-t-line bg-t-panel">
                 <div></div>
-                <SectionLabel>Key</SectionLabel>
-                <SectionLabel>Value</SectionLabel>
-                <SectionLabel>Description</SectionLabel>
+                {/* Header labels match the row inputs' inner padding (px-1.5)
+                    so KEY / VALUE / DESCRIPTION line up with the placeholder
+                    text below, not 6 px to the left of it. */}
+                <SectionLabel className="px-1.5">Key</SectionLabel>
+                <SectionLabel className="px-1.5">Value</SectionLabel>
+                <SectionLabel className="px-1.5">Description</SectionLabel>
                 <div></div>
               </div>
 
