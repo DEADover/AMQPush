@@ -185,3 +185,45 @@ Don't wait to be told to do step 6 — it's part of "doing the release".
   sleep 2 && lsof -ti:1420 | xargs kill -9
   npm run tauri dev > /tmp/amqpush-run.log 2>&1 &
   ```
+
+## Visual / layout debugging — measure first, guess never
+
+When the user reports a **visual bug** ("rows are different heights", "text
+is clipped", "popup is misaligned", "column doesn't line up"), do NOT
+iterate on CSS by re-reading source files and guessing. Open the running
+app in Chrome via the **claude-in-chrome MCP** (Vite dev server is on
+`http://localhost:1420`) and measure the actual rendered DOM with
+`javascript_tool`. One `getBoundingClientRect()` + `getComputedStyle()`
+call answers the question; guessing takes 5-15 iterations and frustrates
+the user.
+
+The pattern:
+1. Ensure `npm run tauri dev` is running (Vite serves the same React app
+   at `http://localhost:1420` that the Tauri WebView consumes).
+2. `tabs_context_mcp` → grab a tab id.
+3. `navigate` to `http://localhost:1420` (with a small `setTimeout` for
+   render).
+4. `javascript_tool` with a snippet that programmatically navigates to
+   the affected view, triggers the state the user described (click Add,
+   open a tab, etc.), and returns the computed measurements. Wrap in
+   `(async () => { ... })()` and `await` between clicks.
+5. Compare numbers. If they match, the bug is in the user's render
+   target — usually a stale WebView, a Tauri-only CSS quirk, or HMR
+   miss. Diagnose accordingly. If they differ, the numbers tell you
+   exactly which property is wrong.
+
+**Tauri uses WebKit on macOS, Chrome uses Blink.** Measurements from
+Chrome are necessary but not sufficient — visual bugs that only show in
+the Tauri window are likely WebKit-specific. The most common one is
+`<input type="text">` rendering at `-webkit-appearance: textfield`
+native size, ignoring CSS `line-height` / `height` / `padding`. Defensive
+fix: explicit `h-N` + `box-border` + `appearance-none` on inputs that
+need to match other elements pixel-for-pixel.
+
+**Real example from history.** A row-height mismatch between Properties
+and Variables tabs in the Send view ate 15 commits of CSS guessing
+(`ch` units, canvas `measureText`, padding overrides, `!important`,
+re-themes) before measurements in Chrome DevTools proved the rows were
+already pixel-identical at 36.54 px — the divergence was only visible in
+Tauri's WebView because of `<input>`'s native sizing. The right move was
+to measure the rendered DOM on the very first iteration.
