@@ -1955,16 +1955,37 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                           </td>
                           <td className="px-2 align-middle text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
                           <td className="px-2 align-middle">
-                            {/* Icon-only flag row. Order is stable so the
-                                same feature always sits in the same column
-                                across rows, making the table scannable. */}
+                            {/* Icon-only flag row. Order mirrors the Send
+                                view's tab strip — Body (schema), Properties,
+                                Variables, Pre-script, Batch (+ Schedule),
+                                Reply — so users can scan the table with the
+                                same left-to-right model they edit templates. */}
                             <div className="flex items-center justify-start gap-2 text-t-ink5">
+                              <FeatureFlag
+                                on={schemaOn}
+                                icon={<ShieldCheck className="w-3.5 h-3.5" />}
+                                color="text-cyan-500"
+                                title={schemaOn ? "Body validation schema configured (JSON Schema or XSD)" : "No body schema"}
+                              />
                               <FeatureFlag
                                 on={propsCount > 0}
                                 icon={<Tag className="w-3.5 h-3.5" />}
                                 color="text-t-ink2"
                                 title={propsCount > 0 ? `${propsCount} custom application-propert${propsCount === 1 ? "y" : "ies"}` : "No custom properties"}
                                 badge={propsCount > 0 ? propsCount : undefined}
+                              />
+                              <FeatureFlag
+                                on={userVarsCount > 0}
+                                icon={<Braces className="w-3.5 h-3.5" />}
+                                color="text-blue-500"
+                                title={userVarsCount > 0 ? `${userVarsCount} user-defined variable${userVarsCount === 1 ? "" : "s"} on the Variables tab` : "No user variables"}
+                                badge={userVarsCount > 0 ? userVarsCount : undefined}
+                              />
+                              <FeatureFlag
+                                on={preScriptOn}
+                                icon={<Code2 className="w-3.5 h-3.5" />}
+                                color="text-emerald-500"
+                                title={preScriptOn ? "Has Pre-script — runs before each send" : "No pre-script"}
                               />
                               <FeatureFlag
                                 on={batchOn}
@@ -1983,25 +2004,6 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                                 icon={<CornerUpLeft className="w-3.5 h-3.5" />}
                                 color="text-violet-500"
                                 title={replyOn ? `Request-reply${tpl.reply_to ? ` on '${tpl.reply_to}'` : " (dynamic source)"}` : "No request-reply"}
-                              />
-                              <FeatureFlag
-                                on={preScriptOn}
-                                icon={<Code2 className="w-3.5 h-3.5" />}
-                                color="text-emerald-500"
-                                title={preScriptOn ? "Has Pre-script — runs before each send" : "No pre-script"}
-                              />
-                              <FeatureFlag
-                                on={schemaOn}
-                                icon={<ShieldCheck className="w-3.5 h-3.5" />}
-                                color="text-cyan-500"
-                                title={schemaOn ? "Body validation schema configured (JSON Schema or XSD)" : "No body schema"}
-                              />
-                              <FeatureFlag
-                                on={userVarsCount > 0}
-                                icon={<Braces className="w-3.5 h-3.5" />}
-                                color="text-blue-500"
-                                title={userVarsCount > 0 ? `${userVarsCount} user-defined variable${userVarsCount === 1 ? "" : "s"} on the Variables tab` : "No user variables"}
-                                badge={userVarsCount > 0 ? userVarsCount : undefined}
                               />
                             </div>
                           </td>
