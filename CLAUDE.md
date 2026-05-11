@@ -186,6 +186,22 @@ Don't wait to be told to do step 6 — it's part of "doing the release".
   npm run tauri dev > /tmp/amqpush-run.log 2>&1 &
   ```
 
+## Effort estimates: S / M / L, not "days"
+
+Never estimate feature work in days / hours when proposing what to build
+next. The user doesn't write the code and I don't take days to do it —
+day-counts are noise that pretend to be planning. Use direct
+**complexity tags** instead:
+
+- **S** — one or two files, additive change, low regression risk
+- **M** — several modules, possibly a new dependency, some plumbing
+- **L** — touches Rust + TS + persisted shapes; meaningful refactor or
+  migration; higher risk of regressions
+
+Or skip the tag entirely and just describe the trade-off. The choice
+between features is "which one is most useful", not "which one fits the
+sprint".
+
 ## Visual / layout debugging — measure first, guess never
 
 When the user reports a **visual bug** ("rows are different heights", "text
