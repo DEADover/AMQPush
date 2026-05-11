@@ -1257,7 +1257,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                     />
                     <input value={row.description ?? ""} onChange={e => updateProp(row.id, "description", e.target.value)}
                       placeholder="description"
-                      className="bg-transparent text-[12px] text-t-ink3 outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
+                      className="bg-transparent text-[12px] text-t-ink3 outline-none placeholder:text-t-ink5 font-mono py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
                     <button onClick={() => removeProp(row.id)}
                       className="opacity-0 group-hover:opacity-100 p-1 text-t-ink5 hover:text-red-500 transition-all rounded">
                       <X className="w-3.5 h-3.5" />
@@ -1359,10 +1359,10 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 font-mono py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
                     <input value={v.value} onChange={e => updateUserVar(v.id, "value", e.target.value)}
                       placeholder="value"
-                      className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
+                      className="bg-transparent text-[12px] text-t-ink outline-none placeholder:text-t-ink5 font-mono py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
                     <input value={v.description} onChange={e => updateUserVar(v.id, "description", e.target.value)}
                       placeholder="description"
-                      className="bg-transparent text-[12px] text-t-ink3 outline-none placeholder:text-t-ink5 py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
+                      className="bg-transparent text-[12px] text-t-ink3 outline-none placeholder:text-t-ink5 font-mono py-1.5 px-1.5 rounded hover:bg-t-card focus:bg-t-field focus:ring-1 focus:ring-blue-500/30" />
                     <button onClick={() => removeUserVar(v.id)}
                       className="opacity-0 group-hover:opacity-100 p-1 text-t-ink5 hover:text-red-500 transition-all rounded">
                       <X className="w-3.5 h-3.5" />

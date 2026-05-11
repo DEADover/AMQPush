@@ -49,7 +49,11 @@ export default function TokenInput({
         ".cm-editor": { backgroundColor: "transparent" },
         ".cm-scroller": {
           fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
-          lineHeight: "1.5",
+          // Match a plain <input>'s default line-height so the row height
+          // matches the key / description inputs in the same grid row. The
+          // body editor uses 1.55 (taller, more readable in multi-line
+          // blocks), but here we want the editor to vanish into the row.
+          lineHeight: "1.2",
           overflowY: "hidden",
           backgroundColor: "transparent",
         },
