@@ -43,23 +43,39 @@ export default function TokenInput({
       EditorView.theme({
         "&": {
           fontSize: "12px",
-          height: "auto",
+          height: "16px",
+          minHeight: "0",
           backgroundColor: "transparent",
         },
-        ".cm-editor": { backgroundColor: "transparent" },
+        // CodeMirror's @codemirror/view baseTheme stacks default styles
+        // we have to crush:
+        //  - `.cm-content { padding: 4px 0; minHeight: 100% }` adds 8 px
+        //    vertical padding + grows to scroller height. Both have to
+        //    go or the editor renders ~8 px taller than a plain <input>.
+        //  - `.cm-line { padding: 0 2px 0 6px }` adds horizontal padding
+        //    that misaligns the value with the key / description cells.
+        //  - `.cm-scroller { lineHeight: 1.4 }` (default) computes to
+        //    16.8 px and we need exactly 16 px to match Tailwind's
+        //    `leading-4` on the plain inputs.
+        // Pinning explicit pixel values everywhere makes the rendered
+        // height deterministic; without these the row was ~30 px tall
+        // against the plain inputs' 28 px.
+        ".cm-editor": {
+          backgroundColor: "transparent",
+          height: "16px",
+          minHeight: "0",
+        },
         ".cm-scroller": {
           fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace',
-          // Pin line-height to an exact pixel value so the editor's row
-          // height matches the plain <input>s in the same grid row down
-          // to the pixel — browsers compute line-height: normal slightly
-          // differently for <input> elements vs <div>s, and even a 1-2 px
-          // delta makes the row look uneven.
           lineHeight: "16px",
+          height: "16px",
+          minHeight: "0",
           overflowY: "hidden",
           backgroundColor: "transparent",
         },
         ".cm-content": {
           padding: "0",
+          minHeight: "0",
           caretColor: "rgb(var(--t-ink))",
           color: "rgb(var(--t-ink))",
           backgroundColor: "transparent",
