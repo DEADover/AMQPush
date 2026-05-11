@@ -1833,17 +1833,33 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                   subtitle='Click "Save current" above to save one'
                 />
               ) : (
-                <table className="w-full text-[12px]">
+                // Columns chosen for at-a-glance triage of saved templates.
+                // The Features column collapses six boolean configuration
+                // flags (batch / schedule / reply / pre-script / schema /
+                // user-vars) into one icon row — each present icon = that
+                // feature is configured, no icon = it's not. Single fixed
+                // height per row, monospace alignment for the numeric
+                // columns, vertical-center on every cell so chips and
+                // counts line up regardless of row content.
+                <table className="w-full text-[12px] table-fixed">
+                  <colgroup>
+                    <col className="w-[24%]" />{/* Name */}
+                    <col className="w-[22%]" />{/* Address */}
+                    <col className="w-[64px]" />{/* Kind */}
+                    <col className="w-[72px]" />{/* Size */}
+                    <col className="w-[64px]" />{/* Props */}
+                    <col className="w-[200px]" />{/* Features */}
+                    <col className="w-[64px]" />{/* Actions */}
+                  </colgroup>
                   <thead className="sticky top-0 bg-t-panel border-b border-t-line z-10">
-                    <tr className="text-left text-[10px] uppercase tracking-wider text-t-ink4 font-semibold">
-                      <th className="px-3 py-1.5 font-semibold">Name</th>
-                      <th className="px-2 py-1.5 font-semibold">Address</th>
-                      <th className="px-2 py-1.5 font-semibold">Kind</th>
-                      <th className="px-2 py-1.5 font-semibold text-right">Size</th>
-                      <th className="px-2 py-1.5 font-semibold text-right">Props</th>
-                      <th className="px-2 py-1.5 font-semibold text-right">Vars</th>
-                      <th className="px-2 py-1.5 font-semibold">Features</th>
-                      <th className="px-2 py-1.5 w-24"></th>
+                    <tr className="text-[10px] uppercase tracking-wider text-t-ink4 font-semibold">
+                      <th className="px-3 py-2 text-left font-semibold">Name</th>
+                      <th className="px-2 py-2 text-left font-semibold">Address</th>
+                      <th className="px-2 py-2 text-center font-semibold">Kind</th>
+                      <th className="px-2 py-2 text-right font-semibold">Size</th>
+                      <th className="px-2 py-2 text-right font-semibold" title="Number of custom application-properties">Props</th>
+                      <th className="px-2 py-2 text-center font-semibold" title="Configuration flags set on this template — batch send, schedule, request-reply, pre-script, body validation schema, user-defined variables">Features</th>
+                      <th className="px-2 py-2" aria-label="Actions" />
                     </tr>
                   </thead>
                   <tbody>
@@ -1859,7 +1875,6 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                               : "text";
                       const sizeBytes = new TextEncoder().encode(tpl.body).length;
                       const propsCount = Object.keys(tpl.properties).length;
-                      const varsCount = (tpl.body.match(/\{\{[^}]+\}\}/g) ?? []).length;
                       const batchOn = tpl.batch_enabled === true
                         || ((tpl.repeat ?? 1) > 1)
                         || ((tpl.delay_ms ?? 0) > 0);
@@ -1871,7 +1886,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       const schemaOn = !!((tpl.body_schema_json && tpl.body_schema_json.trim())
                         || (tpl.body_schema_xsd && tpl.body_schema_xsd.trim())
                         || (tpl.body_schema && tpl.body_schema.trim()));
-                      const userVarsOn = !!(tpl.user_vars && tpl.user_vars.length > 0);
+                      const userVarsCount = tpl.user_vars?.length ?? 0;
                       const kindClass =
                         kind === "json" ? "bg-blue-500/15 text-blue-500" :
                         kind === "xml"  ? "bg-violet-500/15 text-violet-500" :
@@ -1883,7 +1898,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       if (isRenaming) {
                         return (
                           <tr key={tpl.name} className="border-b border-t-line/40 bg-blue-500/5">
-                            <td colSpan={8} className="px-3 py-1.5">
+                            <td colSpan={7} className="px-3 py-1.5">
                               <div className="flex items-center gap-2">
                                 <input
                                   autoFocus
@@ -1919,73 +1934,72 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       return (
                         <tr key={tpl.name}
                           onClick={() => loadTemplate(tpl)}
-                          className="border-b border-t-line/40 hover:bg-t-hover/50 cursor-pointer group transition-colors">
-                          <td className="px-3 py-1.5">
-                            <span className="text-t-ink font-medium truncate block max-w-[240px]" title={tpl.name}>
+                          className="h-9 border-b border-t-line/40 hover:bg-t-hover/50 cursor-pointer group transition-colors">
+                          <td className="px-3 align-middle">
+                            <span className="text-t-ink font-medium truncate block" title={tpl.name}>
                               {tpl.name}
                             </span>
                           </td>
-                          <td className="px-2 py-1.5">
-                            <span className="font-mono text-t-ink3 truncate block max-w-[200px]"
+                          <td className="px-2 align-middle">
+                            <span className="font-mono text-t-ink3 truncate block"
                               title={tpl.address || "no address"}>
                               {tpl.address || <span className="italic text-t-ink5">—</span>}
                             </span>
                           </td>
-                          <td className="px-2 py-1.5">
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium uppercase ${kindClass}`}>
+                          <td className="px-2 align-middle text-center">
+                            <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded font-mono font-medium uppercase ${kindClass}`}>
                               {kind}
                             </span>
                           </td>
-                          <td className="px-2 py-1.5 text-right text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
-                          <td className="px-2 py-1.5 text-right text-t-ink4 font-mono">
+                          <td className="px-2 align-middle text-right text-t-ink4 font-mono">{fmtBytes(sizeBytes)}</td>
+                          <td className="px-2 align-middle text-right text-t-ink4 font-mono">
                             {propsCount > 0 ? propsCount : <span className="text-t-ink5">—</span>}
                           </td>
-                          <td className="px-2 py-1.5 text-right font-mono">
-                            {varsCount > 0
-                              ? <span className="text-blue-500">{varsCount}</span>
-                              : <span className="text-t-ink5">—</span>}
-                          </td>
-                          <td className="px-2 py-1.5">
-                            <div className="flex items-center gap-1 flex-wrap">
-                              {batchOn && (
-                                <span className="flex items-center gap-0.5 text-[10px] text-amber-500 font-mono"
-                                  title={`Batch: ${tpl.repeat ?? 1}×${tpl.delay_ms ? ` every ${tpl.delay_ms}ms` : ""}`}>
-                                  <Repeat2 className="w-2.5 h-2.5" />batch
-                                </span>
-                              )}
-                              {scheduleOn && (
-                                <span className="flex items-center gap-0.5 text-[10px] text-amber-500 font-mono"
-                                  title={`Schedule: ${tpl.schedule_delay_secs ?? 0}s delay`}>
-                                  <Clock className="w-2.5 h-2.5" />schedule
-                                </span>
-                              )}
-                              {replyOn && (
-                                <span className="flex items-center gap-0.5 text-[10px] text-violet-500 font-mono"
-                                  title={`Reply: ${tpl.reply_to ?? "(dynamic)"}`}>
-                                  <CornerUpLeft className="w-2.5 h-2.5" />reply
-                                </span>
-                              )}
-                              {preScriptOn && (
-                                <span className="flex items-center gap-0.5 text-[10px] text-emerald-500 font-mono"
-                                  title="Has Pre-script">
-                                  <Code2 className="w-2.5 h-2.5" />script
-                                </span>
-                              )}
-                              {schemaOn && (
-                                <span className="flex items-center gap-0.5 text-[10px] text-cyan-500 font-mono"
-                                  title="Has body validation schema">
-                                  <ShieldCheck className="w-2.5 h-2.5" />schema
-                                </span>
-                              )}
-                              {userVarsOn && (
-                                <span className="flex items-center gap-0.5 text-[10px] text-t-ink4 font-mono"
-                                  title={`${tpl.user_vars!.length} user variable${tpl.user_vars!.length === 1 ? "" : "s"}`}>
-                                  <Braces className="w-2.5 h-2.5" />{tpl.user_vars!.length}
-                                </span>
-                              )}
+                          <td className="px-2 align-middle">
+                            {/* Icon-only flag row. Order is stable so the
+                                same feature always sits in the same column
+                                across rows, making the table scannable. */}
+                            <div className="flex items-center justify-center gap-2 text-t-ink5">
+                              <FeatureFlag
+                                on={batchOn}
+                                icon={<Repeat2 className="w-3.5 h-3.5" />}
+                                color="text-amber-500"
+                                title={batchOn ? `Batch send: ${tpl.repeat ?? 1}×${tpl.delay_ms ? ` every ${tpl.delay_ms}ms` : ""}` : "No batch send"}
+                              />
+                              <FeatureFlag
+                                on={scheduleOn}
+                                icon={<Clock className="w-3.5 h-3.5" />}
+                                color="text-amber-500"
+                                title={scheduleOn ? `Schedule: ${tpl.schedule_delay_secs ?? 0}s delay before first send` : "No schedule"}
+                              />
+                              <FeatureFlag
+                                on={replyOn}
+                                icon={<CornerUpLeft className="w-3.5 h-3.5" />}
+                                color="text-violet-500"
+                                title={replyOn ? `Request-reply${tpl.reply_to ? ` on '${tpl.reply_to}'` : " (dynamic source)"}` : "No request-reply"}
+                              />
+                              <FeatureFlag
+                                on={preScriptOn}
+                                icon={<Code2 className="w-3.5 h-3.5" />}
+                                color="text-emerald-500"
+                                title={preScriptOn ? "Has Pre-script — runs before each send" : "No pre-script"}
+                              />
+                              <FeatureFlag
+                                on={schemaOn}
+                                icon={<ShieldCheck className="w-3.5 h-3.5" />}
+                                color="text-cyan-500"
+                                title={schemaOn ? "Body validation schema configured (JSON Schema or XSD)" : "No body schema"}
+                              />
+                              <FeatureFlag
+                                on={userVarsCount > 0}
+                                icon={<Braces className="w-3.5 h-3.5" />}
+                                color="text-blue-500"
+                                title={userVarsCount > 0 ? `${userVarsCount} user-defined variable${userVarsCount === 1 ? "" : "s"} on the Variables tab` : "No user variables"}
+                                badge={userVarsCount > 0 ? userVarsCount : undefined}
+                              />
                             </div>
                           </td>
-                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                          <td className="px-2 align-middle text-right whitespace-nowrap">
                             <button
                               onClick={(e) => { e.stopPropagation(); setRenamingTpl(tpl.name); setRenamingDraft(tpl.name); }}
                               title="Rename template"
@@ -2170,6 +2184,38 @@ interface SchemaModalProps {
   bodyEmpty: boolean;
   onClose: () => void;
   onLog: (kind: "info" | "ok" | "err", text: string) => void;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FeatureFlag — one icon slot in the Templates table's Features column.
+//
+// Renders the icon in `color` when `on`, or as a dimmed/faded placeholder
+// when off — so the column has a stable grid of slots in the same order
+// across rows. Optional `badge` shows a small number next to the icon
+// (used for the user-variables count).
+// ─────────────────────────────────────────────────────────────────────────────
+function FeatureFlag({
+  on, icon, color, title, badge,
+}: {
+  on: boolean;
+  icon: ReactNode;
+  color: string;
+  title: string;
+  badge?: number;
+}) {
+  return (
+    <span
+      title={title}
+      className={`inline-flex items-center gap-0.5 font-mono text-[10px] transition-colors ${
+        on ? color : "text-t-line2/60"
+      }`}
+    >
+      {icon}
+      {on && badge !== undefined && badge > 0 && (
+        <span className="leading-none">{badge}</span>
+      )}
+    </span>
+  );
 }
 
 function SchemaModal({
