@@ -106,10 +106,17 @@ export interface PreScriptResult {
  * `globalThis` — this is a usability sandbox, not a security boundary.
  * Don't import templates from untrusted sources.)
  */
-export function runPreScript(
+/** Constructor for an async function literal — used to compile user pre-scripts
+ *  so they can `await` Web Crypto, timers, and other Promise-returning APIs at
+ *  the top level. Not exposed by the standard runtime; recovered via the
+ *  prototype chain of an async function expression. */
+const AsyncFunction: new (...args: string[]) => (...args: unknown[]) => Promise<unknown> =
+  Object.getPrototypeOf(async function () {}).constructor;
+
+export async function runPreScript(
   script: string,
   existingVars: UserVariable[]
-): PreScriptResult {
+): Promise<PreScriptResult> {
   const vars: Record<string, string> = {};
   const logs: string[] = [];
 
@@ -136,11 +143,14 @@ export function runPreScript(
   };
 
   try {
-    // `new Function` keeps the script in its own scope; we only expose what
-    // we hand in via parameters. `"use strict"` to keep behaviour predictable.
-    const fn = new Function("ctx", "Date", "Math", "JSON", "crypto",
+    // Compile as an *async* function so `await` works at the top level —
+    // useful for `crypto.subtle.digest`, fetch wrappers, anything that
+    // returns a Promise. We only expose what's passed via parameters;
+    // the script can still reach `globalThis` (deliberately — pre-script
+    // is a usability sandbox, not a security boundary).
+    const fn = new AsyncFunction("ctx", "Date", "Math", "JSON", "crypto",
       `"use strict";\n${script}`);
-    fn(ctx, Date, Math, JSON, crypto);
+    await fn(ctx, Date, Math, JSON, crypto);
     return { vars, logs };
   } catch (e) {
     return { vars, logs, error: (e as Error).message };

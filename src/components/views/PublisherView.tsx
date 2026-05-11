@@ -696,7 +696,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         // so scripts can read columns via `ctx.get("col_name")`.
         let varsForRow: UserVariable[] = [...csvVars, ...userVars];
         if (preScript.trim()) {
-          const r = runPreScript(preScript, varsForRow);
+          const r = await runPreScript(preScript, varsForRow);
           for (const line of r.logs) onLog("info", `pre-script (row ${i + 1}): ${line}`);
           if (r.error) {
             failed++;
@@ -828,7 +828,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         // (script wins on key collision).
         let scriptVars: UserVariable[] = userVars;
         if (preScript.trim()) {
-          const r = runPreScript(preScript, userVars);
+          const r = await runPreScript(preScript, userVars);
           for (const line of r.logs) onLog("info", `pre-script: ${line}`);
           if (r.error) {
             onLog("err", `Pre-script error: ${r.error}`);
@@ -1392,8 +1392,8 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                 Runs once per send (so once per batch iteration too — useful for unique IDs and timestamps).
               </span>
               <button
-                onClick={() => {
-                  const r = runPreScript(preScript, userVars);
+                onClick={async () => {
+                  const r = await runPreScript(preScript, userVars);
                   for (const line of r.logs) onLog("info", `pre-script: ${line}`);
                   if (r.error) onLog("err", `Pre-script error: ${r.error}`);
                   else {

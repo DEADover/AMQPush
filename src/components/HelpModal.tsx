@@ -264,29 +264,171 @@ const SECTIONS: HelpSection[] = [
     title: "Pre-script",
     icon: <Code2 className="w-3.5 h-3.5" />,
     parentId: "send",
-    searchText: "pre-script javascript sandbox dynamic variables ctx.set quickjs runtime per-send",
+    searchText: "pre-script javascript sandbox dynamic variables ctx.set ctx.get ctx.log ctx.uuid ctx.now runtime per-send counter sequence base64 hash timestamp routing key examples",
     content: (
       <>
         <H><Code2 className="w-4 h-4 text-blue-500" />Pre-script</H>
         <P>
-          A small JavaScript snippet that runs <i>before each send</i>, in a sandboxed context.
-          Use it to compute variable values dynamically — counters, derived IDs, randomized
-          selections.
+          Pre-script is a small JavaScript snippet that runs <i>once before every send</i>. It
+          lets you compute dynamic variable values that simple <Code>{"{{token}}"}</Code>{" "}
+          substitution can't express on its own — derived IDs, conditional routing keys,
+          encoded payloads, anything where you need a tiny bit of logic instead of a static
+          string.
         </P>
-        <H3>API</H3>
+        <H3>When it runs</H3>
         <UL>
-          <Li><Code>ctx.set(key, value)</Code> — sets / overrides a user variable for this send.</Li>
-          <Li><Code>ctx.get(key)</Code> — reads the current value (built-in or user).</Li>
-          <Li><Code>ctx.iter</Code> — 1-based index in the Batch loop (always <Code>1</Code> for single sends).</Li>
+          <Li><b>Once per Send click</b> for a single message.</Li>
+          <Li><b>Once per Batch iteration</b> — variables recompute, so <Code>{"{{counter}}"}</Code> or your own sequence shows fresh values each message.</Li>
+          <Li><b>Once per CSV row</b> — column values are available via <Code>ctx.get("col_name")</Code>; the script can derive further fields from them.</Li>
         </UL>
-        <H3>Example</H3>
-        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`// Increment a counter, derive a routing key
-const n = (ctx.get("seq") | 0) + 1;
+        <P>
+          Any variables you set with <Code>ctx.set(...)</Code> are available as{" "}
+          <Code>{"{{name}}"}</Code> tokens in the Body and Properties tabs for that iteration's
+          send. They do <i>not</i> persist between sends — each iteration starts fresh and
+          re-runs the script.
+        </P>
+
+        <H3>API reference</H3>
+        <Row label={<Code>ctx.set(key, value)</Code>}>
+          Register a variable for this iteration. <Code>value</Code> is coerced to a string —
+          objects are stringified, <Code>null</Code> / <Code>undefined</Code> become <Code>""</Code>.
+        </Row>
+        <Row label={<Code>ctx.get(key)</Code>}>
+          Read a variable. Looks first at values set earlier in <i>this</i> run, then at
+          enabled rows on the Variables tab. Returns <Code>undefined</Code> if neither has it.
+        </Row>
+        <Row label={<Code>ctx.log(...args)</Code>}>
+          Append a line to the AMQPush log (prefixed{" "}
+          <Code>pre-script: …</Code>). Each arg is stringified individually then joined with
+          spaces. Useful for debugging without running every send through the editor.
+        </Row>
+        <Row label={<Code>ctx.now</Code>}>
+          <Code>Date.now()</Code> snapshot at the start of this run. Stable across the whole
+          script invocation so all <Code>ctx.set</Code> values that derive from it agree.
+        </Row>
+        <Row label={<Code>ctx.uuid()</Code>}>
+          Generates a fresh UUID v4 (via <Code>crypto.randomUUID()</Code>). Each call returns
+          a new id — useful for correlation-ids you want to repeat across multiple variables.
+        </Row>
+        <Row label={<Code>ctx.iter</Code>}>
+          1-based loop index in Batch and CSV modes; always <Code>1</Code> for a single send.
+          Use it for "every Nth message do X" branches.
+        </Row>
+        <P>
+          Standard JS built-ins are available too: <Code>Date</Code>, <Code>Math</Code>,
+          <Code>JSON</Code>, <Code>crypto</Code> (full Web Crypto API including{" "}
+          <Code>crypto.subtle.digest</Code>), <Code>btoa</Code> / <Code>atob</Code>,
+          <Code>String</Code>, <Code>Array</Code>, <Code>Object</Code>, and friends.
+        </P>
+
+        <H3>Worked examples</H3>
+
+        <H3>Sequence counter that persists across batch</H3>
+        <P>Increment a saved counter, derive a partition key from it:</P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`const n = (ctx.get("seq") | 0) + 1;
 ctx.set("seq", n);
-ctx.set("routing", "us-east." + (n % 4));`}</pre>
+ctx.set("partition", "us-east." + (n % 4));
+ctx.set("ordinal", n.toString().padStart(6, "0"));`}</pre>
+        <P>
+          In Body: <Code>{`{"seq": {{seq}}, "partition": "{{partition}}", "id": "ORD-{{ordinal}}"}`}</Code>
+        </P>
+
+        <H3>Conditional routing key by environment</H3>
+        <P>Pick a different routing target depending on a user var:</P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`const env = ctx.get("env") ?? "dev";
+const target = {
+  dev:     "queue.dev.orders",
+  staging: "queue.stg.orders",
+  prod:    "queue.prod.orders",
+}[env] ?? "queue.dev.orders";
+ctx.set("destination", target);
+ctx.log("routing to", target);`}</pre>
+
+        <H3>Weighted random pick</H3>
+        <P>70% A, 20% B, 10% C — handy for synthetic load tests:</P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`const r = Math.random();
+ctx.set("variant",
+  r < 0.7 ? "A"
+  : r < 0.9 ? "B"
+  : "C");`}</pre>
+
+        <H3>Timestamp in a non-standard format</H3>
+        <P>
+          Built-in <Code>{"{{date}}"}</Code> is ISO 8601. If the consumer wants RFC 3339 with
+          a millisecond stamp or a custom layout, compute it:
+        </P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`const d = new Date(ctx.now);
+const pad = (n, w = 2) => String(n).padStart(w, "0");
+ctx.set("ts_local",
+  d.getFullYear() + "-" +
+  pad(d.getMonth() + 1) + "-" +
+  pad(d.getDate()) + " " +
+  pad(d.getHours()) + ":" +
+  pad(d.getMinutes()) + ":" +
+  pad(d.getSeconds()) + "." +
+  pad(d.getMilliseconds(), 3));`}</pre>
+
+        <H3>SHA-256 over a payload field for tamper-detection</H3>
+        <P>Web Crypto API works directly:</P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`const payload = ctx.get("order_id") + "|" + ctx.now;
+const buf  = new TextEncoder().encode(payload);
+const hash = await crypto.subtle.digest("SHA-256", buf);
+const hex  = [...new Uint8Array(hash)]
+  .map(b => b.toString(16).padStart(2, "0"))
+  .join("");
+ctx.set("signature", hex);`}</pre>
+        <Note>
+          The script body is wrapped in an async-friendly invocation — <Code>await</Code>{" "}
+          works at the top level. Pre-script returns after all promises resolve, so the
+          send waits for your hash to complete.
+        </Note>
+
+        <H3>Base64-encode a property</H3>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`const json = JSON.stringify({
+  user:  ctx.get("username"),
+  tier:  ctx.get("tier"),
+  iat:   Math.floor(ctx.now / 1000),
+});
+ctx.set("auth_b64", btoa(json));`}</pre>
+
+        <H3>Per-row transform from CSV</H3>
+        <P>
+          When CSV mode is active, every column header is available via{" "}
+          <Code>ctx.get("col_name")</Code>. Use the script to derive computed fields
+          before substitution:
+        </P>
+        <pre className="text-[12px] font-mono bg-t-card border border-t-line rounded-md p-2.5 overflow-x-auto mb-3">{`// CSV columns: customer_email, amount_usd
+const email = ctx.get("customer_email") ?? "";
+ctx.set("email_domain", email.split("@")[1] ?? "unknown");
+
+const usd = parseFloat(ctx.get("amount_usd") ?? "0");
+ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
+
+        <H3>Best practices</H3>
+        <UL>
+          <Li><b>Keep scripts short.</b> One iteration runs the whole script for every send — heavy logic slows your batch loop. If you need ten lines of setup, build it inline; if you need fifty, you're probably writing the wrong tool.</Li>
+          <Li><b>Use <Code>ctx.log</Code> liberally during development</b>, then remove the calls before bulk runs — log entries don't dedupe and a 10 000-row CSV would flood the Logs view.</Li>
+          <Li><b>Don't rely on global state.</b> A new script context is built for every send; closures over outer scope (<Code>let x = …</Code>) reset between iterations.</Li>
+          <Li><b>Stick to pure computation.</b> No network calls, no Tauri APIs, no DOM. The script runs in the WebView's JS context but the sandbox intentionally omits them; if you need to call out, do it ahead of time and paste the result.</Li>
+        </UL>
+
+        <H3>Errors</H3>
+        <P>
+          A thrown exception aborts the send with the exception message in the log
+          (<Code>err: Pre-script error: …</Code>). The script's already-set variables are
+          still applied to the body (so a half-failed run can still produce a partial
+          message), but most users prefer to fix the script and retry.
+        </P>
+        <P>
+          Syntax errors are caught at the same moment — the script doesn't run, and the
+          error shows up in the log before any send is attempted.
+        </P>
+
         <Warn>
-          The script runs in a JS sandbox — no <Code>fetch</Code>, no DOM, no Node APIs. Treat it as
-          pure computation only.
+          Pre-script is a usability sandbox, not a security boundary. Loading templates
+          from untrusted sources can run arbitrary JavaScript in the AMQPush WebView. Treat
+          shared <Code>templates.json</Code> files the same way you'd treat shared shell
+          scripts.
         </Warn>
       </>
     ),
