@@ -1,6 +1,6 @@
 [package]
 name = "amqpush"
-version = "1.3.0"
+version = "1.4.0"
 description = "AMQPush — AMQP 1.0 desktop client"
 authors = ["sgryzhin"]
 edition = "2021"

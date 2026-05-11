@@ -4,6 +4,64 @@ All notable changes to AMQPush are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-05-12
+
+### Highlights
+- **Clients inspector** (new `⌘5` sidebar item) — see everyone currently attached to the broker, including AMQPush itself. Left pane lists active connections (client address, user, inferred protocol, session count, age). Click a row to see the consumers attached to that connection on the right, with **Credit** showing how many messages each consumer is currently holding. AMQPush's own management / notification consumers are filtered out by default (toggle via a header button). A "Raw" debug overlay surfaces the verbatim broker response when you need to diagnose field-name mismatches across Artemis versions.
+- **"Who holds it?" drill-down on peeked messages** — every expanded peek message in Browser gets a Users chip that, on click, loads the consumers attached to that queue, joined to their client connection. Rows with non-zero credit (the practical "who is sitting on this message right now?" answer) are highlighted. Companion feature to Clients.
+- **Live broker latency indicator** — a small `Xms` chip in the header next to the green "Connected" dot, polled every 5 s via a trivial management RPC. Goes amber at >100 ms, red at >500 ms — surfaces degrading network / broker conditions before a send or subscribe stalls.
+- **Send progress sparkline** — Batch and CSV sends now render a tiny throughput sparkline next to the running counter, so you can see when the broker starts throttling instead of staring at a flat "247 / 1000 sent".
+- **Body diff against previous send** — every History entry now has a **Compare with previous to <queue>** action that opens a side-by-side LCS diff vs. the most recent prior send to the same destination. Useful for "wait, what changed since last time this worked?" moments.
+- **Configurable subscriber reconnect backoff** — per-profile base / max / multiplier knobs (Advanced tab in Connection). Defaults match the old hard-coded behaviour (1 s → 30 s, ×2) but you can now tune them down for fast-iteration dev work or up to spare the broker log during long outages.
+
+### Added — Clients view
+- New `⌘5` sidebar item **Clients**, between Browser and History.
+- Two Tauri commands `list_broker_connections` / `list_broker_consumers` calling Artemis's `listConnectionsAsJSON` / `listAllConsumersAsJSON` over the same long-lived management channel as Browser. Field extraction is tolerant of cross-version key renames (`connectionID` vs `connectionId` vs `id`; `consumerID` vs `sequentialId`; `messagesInTransit` vs `deliveringCount`; etc.) and copes with `users` returned as a `Set<String>`.
+- Protocol is inferred from the implementation class when the broker omits the `protocol` field (e.g. `ActiveMQProtonRemotingConnection` → AMQP, `Stomp*` → STOMP).
+- Internal AMQPush consumers (UUID-named dynamic-source receivers for management RPC, the notifications drainer, and request-reply) are hidden by default with a `(+N internal)` counter; toggle with the **Internal** header button.
+- Raw JSON debug overlay — toggle via the **`<>` Raw** header button to see exactly what the broker returned for both RPCs.
+- Filter input narrows connections by user / host / protocol / connection-id.
+- Auto-refresh every 3 s while the view is visible; 1 Hz tick keeps "ago" timestamps fresh in place.
+
+### Added — Browser view
+- **Who holds it?** chip in the expanded peek-message header. Lazy-loaded panel listing consumers attached to this queue (joined to their connection's `clientAddress` / `users`) with credit outstanding and last-RX timestamp. Non-zero credit rows highlighted in blue.
+- The **Requeue all** button on DLQ queues is now always rendered (disabled when the queue is empty) so its location is discoverable even before messages arrive — the existing DLQ banner mentions it explicitly, a hidden button was confusing.
+
+### Added — Header / status bar
+- Broker latency chip (`Xms`) next to the green Connected dot — colours: ≤100 ms green, ≤500 ms amber, otherwise red. Polled via `broker.getName` over the existing management channel so the broker doesn't see extra connections.
+
+### Added — Send view
+- Live throughput sparkline alongside batch and CSV progress counters. Auto-scales Y to the running max, fills in as samples accumulate, hides when below 2 samples.
+
+### Added — History view
+- **Compare with previous to <queue>** action on each entry — opens a modal with the side-by-side LCS diff of the two bodies, JSON / XML pretty-printed before diffing.
+- New `src/utils/diff.ts` module shares the LCS implementation between History and the existing two-message compare on Receive.
+
+### Added — Connection / Advanced tab
+- New **Subscriber reconnect backoff** card with three numeric inputs: base ms, max ms, multiplier. Persisted per profile.
+- `Profile` schema (Rust + TS) gained `reconnect_base_ms`, `reconnect_max_ms`, `reconnect_multiplier`, all optional with sensible defaults — old `profiles.json` files keep working unchanged.
+
+### Changed
+- Sidebar shortcuts shifted down to accommodate Clients: History → `⌘6`, Stats → `⌘7`, Logs → `⌘8`.
+- `subscriber::start` reads the backoff knobs from the `AmqpClient` state on each call rather than using compile-time constants.
+- Help modal grew a new **Clients** section and a **Who holds this message?** subsection inside Browser. Pre-script docs were rewritten with seven worked examples, an API reference, and best-practices guidance.
+
+### Fixed
+- Pre-script now runs as an async function — `await crypto.subtle.digest(...)` and other async APIs work as the docs claim. Three call sites updated to `await runPreScript(...)`.
+- Templates table: dropped the always-narrow Props column (moved into Features icons), Kind rendered as plain text instead of a chip, every column left-aligned, row heights pinned, Features icon order matches the Send tab strip exactly.
+- Properties / Variables row alignment in the Send view — the WebKit-only render gap (15-iteration saga) is recorded in `CLAUDE.md` as the "measure first" rule.
+- Format helpers (`fmtBytes` / `fmtDuration`) are now imported from `src/utils/format.ts` everywhere instead of being re-implemented inside PublisherView.
+
+### Backend
+- `BrokerConnection` / `BrokerConsumer` types in `broker.rs` are populated via hand-walked `serde_json::Value` extraction so AMQPush survives the dozen+ slightly-different field naming conventions across Artemis 2.x versions and ActiveMQ Classic.
+- Long-lived management channel now handles four call shapes: `list_queues_via`, `ping_via`, `list_connections_via`, `list_consumers_via`. All four reuse the same `Sender` + dynamic-source `Receiver`, avoiding the SESSION_CLOSED notification storm that comes with per-call channels.
+- New Tauri commands: `list_broker_connections`, `list_broker_consumers`, `fetch_broker_connections_raw`, `fetch_broker_consumers_raw`, `ping_broker`. The two `*_raw` commands return the unparsed JSON string for the Clients view's debug overlay.
+- Foundation hardening landed alongside the headline features:
+  - schema migration scaffolding (`version: u32` + `migrate_*_v1_to_v2`) in `profiles.rs` and `templates.rs`;
+  - `#[serde(flatten)] extra: HashMap<String, Value>` on Profile / Template so manually-added fields survive save round-trips;
+  - one-time history trim on load so pre-cap installations don't keep growing `history.json` past 200 entries;
+  - subscriber permanent-failure detection — surfaces "address deleted" / "permission denied" as a non-retried red-banner event instead of looping forever.
+
 ## [1.3.0] — 2026-05-10
 
 ### Highlights
@@ -262,6 +320,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Light / dark / system theme.
 - Logs view with persistent localStorage backing.
 
+[1.4.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.4.0
 [1.3.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.3.0
 [1.2.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.2.0
 [1.1.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.1.0
