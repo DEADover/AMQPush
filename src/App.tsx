@@ -8,6 +8,7 @@ import HistoryView from "./components/views/HistoryView";
 import StatsView, { StatsData, emptyStats, trackSentInStats, trackReceivedInStats, trackSendErrorInStats } from "./components/views/StatsView";
 import ConsoleView from "./components/views/ConsoleView";
 import BrowserView from "./components/views/BrowserView";
+import InspectorView from "./components/views/InspectorView";
 import Dropdown, { DropdownItem, DropdownSection, DropdownFooter } from "./components/Dropdown";
 import CommandPalette, { PaletteAction } from "./components/CommandPalette";
 import HelpModal from "./components/HelpModal";
@@ -24,7 +25,7 @@ let logId = 0;
 
 const VIEW_KEYS: Record<string, View> = {
   "1": "connection", "2": "publisher", "3": "subscriber", "4": "browser",
-  "5": "history",    "6": "stats",     "7": "console",
+  "5": "inspector",  "6": "history",   "7": "stats",     "8": "console",
 };
 
 /**
@@ -54,6 +55,7 @@ function helpSectionFor(view: View, pubTab: string): string {
     case "connection": return "connection";
     case "subscriber": return "receive";
     case "browser":    return "browser";
+    case "inspector":  return "inspector";
     case "history":    return "history";
     case "stats":      return "stats";
     case "console":    return "logs";
@@ -641,6 +643,11 @@ export default function App() {
               <BrowserView connected={connected} visible={view === "browser"} onLog={addLog} onPublishTo={handlePublishTo} onSubscribeTo={handleSubscribeTo} />
             </div>
 
+            {/* Inspector */}
+            <div className={view === "inspector" ? "flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden" : "hidden"}>
+              <InspectorView connected={connected} visible={view === "inspector"} onLog={addLog} />
+            </div>
+
             {/* History */}
             <div className={view === "history" ? "flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden" : "hidden"}>
               <HistoryView connected={connected} refreshVersion={historyVersion} onLog={addLog} onResend={handleResend} />
@@ -778,9 +785,10 @@ function buildPaletteActions(opts: {
     { id: "publisher",  label: "Go to Send",       kbd: "⌘2", icon: <Sparkles  className="w-3.5 h-3.5" /> },
     { id: "subscriber", label: "Go to Receive",    kbd: "⌘3", icon: <Sparkles  className="w-3.5 h-3.5" /> },
     { id: "browser",    label: "Go to Browser",    kbd: "⌘4", icon: <Sparkles  className="w-3.5 h-3.5" /> },
-    { id: "history",    label: "Go to History",    kbd: "⌘5", icon: <Sparkles  className="w-3.5 h-3.5" /> },
-    { id: "stats",      label: "Go to Stats",      kbd: "⌘6", icon: <Sparkles  className="w-3.5 h-3.5" /> },
-    { id: "console",    label: "Go to Logs",       kbd: "⌘7", icon: <Terminal  className="w-3.5 h-3.5" /> },
+    { id: "inspector",  label: "Go to Clients",    kbd: "⌘5", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "history",    label: "Go to History",    kbd: "⌘6", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "stats",      label: "Go to Stats",      kbd: "⌘7", icon: <Sparkles  className="w-3.5 h-3.5" /> },
+    { id: "console",    label: "Go to Logs",       kbd: "⌘8", icon: <Terminal  className="w-3.5 h-3.5" /> },
   ];
   for (const v of VIEWS) {
     out.push({

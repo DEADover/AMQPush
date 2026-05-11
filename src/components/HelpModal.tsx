@@ -3,7 +3,7 @@ import {
   X, Search, BookOpen, Plug, Send, Inbox, ListTree, History as HistoryIcon,
   BarChart3, Terminal, Keyboard, Sparkles, ShieldCheck, Braces, Code2,
   Repeat2, CornerDownLeft, BookMarked, Database, FileSpreadsheet, Filter,
-  AlertTriangle, Lightbulb, ChevronRight,
+  AlertTriangle, Lightbulb, ChevronRight, Network,
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -699,7 +699,7 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
     id: "browser",
     title: "Browser",
     icon: <ListTree className="w-3.5 h-3.5" />,
-    searchText: "browser queue browser peek messages purge delete management rpc artemis remove all messages refresh dlq dead letter requeue redeliver original destination",
+    searchText: "browser queue browser peek messages purge delete management rpc artemis remove all messages refresh dlq dead letter requeue redeliver original destination who holds message consumer credit unacked",
     content: (
       <>
         <H><ListTree className="w-4 h-4 text-blue-500" />Queue browser</H>
@@ -756,6 +756,61 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
           Requeue does <i>not</i> delete the original from the DLQ — peek-and-republish leaves
           the source untouched. After a successful Requeue all, follow up with the Purge button
           to clean up.
+        </Note>
+
+        <H3>Who holds this message?</H3>
+        <P>
+          Each expanded peek message has a <b>Who holds it?</b> chip in its header. Clicking it
+          loads the consumers currently attached to the queue, grouped per client connection,
+          with the <b>Credit</b> column showing each consumer's outstanding (unacked) message
+          count. Rows highlighted in blue have non-zero credit — those are the consumers most
+          likely sitting on this message right now.
+        </P>
+        <Note>
+          Artemis doesn't expose a per-message lock owner through management, so this is an
+          inference rather than a guarantee. Use it together with <b>Clients</b> (⌘5)
+          when chasing "why is this message stuck?".
+        </Note>
+      </>
+    ),
+  },
+
+  /* ── Inspector ───────────────────────────────────────────────────────── */
+  {
+    id: "inspector",
+    title: "Clients",
+    icon: <Network className="w-3.5 h-3.5" />,
+    searchText: "inspector clients connections consumers who holds message credit unacked broker management listConnectionsAsJSON listAllConsumersAsJSON session protocol",
+    content: (
+      <>
+        <H><Network className="w-4 h-4 text-blue-500" />Clients inspector</H>
+        <P>
+          Shows everyone connected to the broker right now — both AMQPush itself and any
+          other clients (other AMQP libraries, Core / OpenWire / STOMP, the broker's own
+          management). Auto-refreshes every 3 seconds.
+        </P>
+        <H3>Left pane — client connections</H3>
+        <P>
+          One row per active client connection. Columns are <b>Client</b> (remote
+          address), <b>User</b>, <b>Proto</b> (AMQP / CORE / OPENWIRE / STOMP / MQTT),
+          <b>Cons</b> (consumer count on this connection), <b>Sess</b> (session count)
+          and <b>Age</b> (time since the connection opened). Click a row to see what it's
+          consuming.
+        </P>
+        <H3>Right pane — consumers</H3>
+        <P>
+          One row per consumer attached to the selected connection. <b>Credit</b> is the
+          number of messages the consumer has currently "checked out" but not yet
+          acknowledged — the metric that answers <i>«who is holding my message right
+          now?»</i>. A non-zero credit on an idle consumer is the classic signature of a
+          stuck handler. <b>Last RX</b> is time since the last delivery; <b>Age</b> is
+          time since the consumer attached.
+        </P>
+        <Note>
+          Requires Artemis or ActiveMQ Classic with AMQP management enabled — same
+          requirement as Browser. The data comes from{" "}
+          <Code>listConnectionsAsJSON</Code> and <Code>listAllConsumersAsJSON</Code>{" "}
+          routed over the same long-lived management channel.
         </Note>
       </>
     ),

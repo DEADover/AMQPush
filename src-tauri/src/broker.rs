@@ -59,6 +59,146 @@ pub struct PeekedMessage {
     pub delivery_count: u32,
 }
 
+/// One AMQP / Core client connection on the broker — flat, frontend-ready
+/// shape. Built by hand-walking the JSON Artemis returns, so we can support
+/// the dozen+ slightly-different key namings across Artemis versions (and
+/// ActiveMQ Classic when it accepts AMQP). The frontend uses these to
+/// surface "who's connected right now" and join consumers back to their
+/// connection.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrokerConnection {
+    pub connection_id: String,
+    pub client_address: String,
+    pub users: String,
+    pub session_count: u32,
+    pub creation_time: i64,
+    pub implementation: String,
+    pub protocol: String,
+}
+
+/// One AMQP / Core consumer on the broker. Joined to a connection via
+/// `connection_id` and a queue via `queue`. The "interesting" metrics are
+/// `messages_in_transit` (credit currently outstanding) and the count /
+/// timestamps — they answer "who is holding this message right now".
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrokerConsumer {
+    pub id: i64,
+    pub connection_id: String,
+    pub session_id: String,
+    pub queue: String,
+    pub address: String,
+    pub browse_only: bool,
+    pub creation_time: i64,
+    pub messages_in_transit: i64,
+    pub messages_delivered: i64,
+    pub messages_acknowledged: i64,
+    pub last_delivered_time: i64,
+    pub last_acknowledged_time: i64,
+    pub protocol: String,
+}
+
+/// Pull a string field by trying each candidate key in order. Coerces
+/// numbers / booleans to their string form and joins arrays (sets-as-arrays
+/// are common — e.g. `users: ["alice"]` on Artemis ≥ 2.18).
+fn obj_str(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> String {
+    for k in keys {
+        let Some(v) = obj.get(*k) else { continue };
+        match v {
+            serde_json::Value::String(s) => return s.clone(),
+            serde_json::Value::Number(n) => return n.to_string(),
+            serde_json::Value::Bool(b) => return b.to_string(),
+            serde_json::Value::Array(arr) => {
+                let joined = arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from).or_else(|| x.as_i64().map(|n| n.to_string())))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !joined.is_empty() { return joined; }
+            }
+            serde_json::Value::Null => continue,
+            _ => continue,
+        }
+    }
+    String::new()
+}
+
+fn obj_i64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> i64 {
+    for k in keys {
+        let Some(v) = obj.get(*k) else { continue };
+        if let Some(n) = v.as_i64() { return n; }
+        if let Some(s) = v.as_str() {
+            if let Ok(n) = s.parse::<i64>() { return n; }
+        }
+    }
+    0
+}
+
+fn obj_u32(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> u32 {
+    obj_i64(obj, keys).clamp(0, u32::MAX as i64) as u32
+}
+
+fn obj_bool(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> bool {
+    for k in keys {
+        let Some(v) = obj.get(*k) else { continue };
+        if let Some(b) = v.as_bool() { return b; }
+    }
+    false
+}
+
+/// Best-effort wire-protocol inference from Artemis's `implementation`
+/// class name. Artemis's `listConnectionsAsJSON` often omits the `protocol`
+/// field entirely (at least up through 2.x), but the implementation class
+/// name reliably identifies the protocol stack. Falls back to the class
+/// name itself if nothing matches — better than a blank cell.
+fn infer_protocol_from_impl(s: &str) -> String {
+    let lo = s.to_ascii_lowercase();
+    if lo.contains("proton") || lo.contains("amqp") { return "AMQP".into(); }
+    if lo.contains("stomp")    { return "STOMP".into(); }
+    if lo.contains("mqtt")     { return "MQTT".into(); }
+    if lo.contains("openwire") { return "OPENWIRE".into(); }
+    if lo.contains("hornetq")  { return "HORNETQ".into(); }
+    if lo.contains("core") || (lo.contains("activemq") && lo.contains("remoting")) { return "CORE".into(); }
+    String::new()
+}
+
+fn parse_connection_obj(v: &serde_json::Value) -> Option<BrokerConnection> {
+    let obj = v.as_object()?;
+    let implementation = obj_str(obj, &["implementation", "implName", "transport"]);
+    let mut protocol = obj_str(obj, &["protocol", "protocolName"]);
+    if protocol.is_empty() {
+        protocol = infer_protocol_from_impl(&implementation);
+    }
+    Some(BrokerConnection {
+        connection_id:  obj_str(obj, &["connectionID", "connectionId", "id", "remoteAddress"]),
+        client_address: obj_str(obj, &["clientAddress", "remoteAddress", "client", "address"]),
+        users:          obj_str(obj, &["users", "user", "userName", "principal"]),
+        session_count:  obj_u32(obj, &["sessionCount", "sessions", "nrOfSessions"]),
+        creation_time:  obj_i64(obj, &["creationTime", "created", "createdTime", "connectionTimestamp", "connectTime"]),
+        implementation,
+        protocol,
+    })
+}
+
+fn parse_consumer_obj(v: &serde_json::Value) -> Option<BrokerConsumer> {
+    let obj = v.as_object()?;
+    Some(BrokerConsumer {
+        // `consumerID` on Artemis is often 0 (always-zero pseudo-id), so
+        // prefer the actual unique `sequentialId` (camelCase) / `sequentialID`.
+        id:                     obj_i64(obj,  &["sequentialId", "sequentialID", "id", "consumerID"]),
+        connection_id:          obj_str(obj,  &["connectionID", "connectionId", "remoteAddress"]),
+        session_id:             obj_str(obj,  &["sessionID", "sessionId", "session"]),
+        queue:                  obj_str(obj,  &["queueName", "queue", "destinationName"]),
+        address:                obj_str(obj,  &["address", "destination"]),
+        browse_only:            obj_bool(obj, &["browseOnly", "browse"]),
+        creation_time:          obj_i64(obj,  &["creationTime", "created", "createdTime"]),
+        messages_in_transit:    obj_i64(obj,  &["messagesInTransit", "deliveringCount", "inflightCount", "credit"]),
+        messages_delivered:     obj_i64(obj,  &["messagesDelivered", "deliveredCount"]),
+        messages_acknowledged:  obj_i64(obj,  &["messagesAcknowledged", "ackedCount", "acknowledgedCount"]),
+        last_delivered_time:    obj_i64(obj,  &["lastDeliveredTime", "lastDelivery", "lastDeliveredAt"]),
+        last_acknowledged_time: obj_i64(obj,  &["lastAcknowledgedTime", "lastAckTime", "lastAckedAt"]),
+        protocol:               obj_str(obj,  &["protocol", "protocolName"]),
+    })
+}
+
 const MGMT_ADDRESS: &str = "activemq.management";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -166,6 +306,57 @@ pub async fn ping_via(channel: &mut ManagementChannel) -> Result<u64, String> {
         Body::Value(AmqpValue(Value::String("[]".into()))),
     ).await?;
     Ok(started.elapsed().as_millis() as u64)
+}
+
+/// List active connections on the broker. Artemis returns the result as a
+/// JSON-encoded string (legacy `*AsJSON` operation), so we deserialize the
+/// inner String once via the management transport, then re-parse the JSON
+/// payload to typed `BrokerConnection`s. Returns an empty list rather than
+/// an error if the broker omits or formats the field unexpectedly — the
+/// inspector view falls back to an "unknown" state gracefully.
+pub async fn list_connections_via(channel: &mut ManagementChannel) -> Result<Vec<BrokerConnection>, String> {
+    let raw = fetch_connections_raw_via(channel).await?;
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| format!("decode listConnectionsAsJSON (expected array): {e} — raw: {raw}"))?;
+    Ok(arr.iter().filter_map(parse_connection_obj).collect())
+}
+
+/// Raw `listConnectionsAsJSON` payload as Artemis returned it. Surfaced by
+/// the inspector's "Raw" debug toggle so the user can see the actual field
+/// names and diagnose parser mismatches across broker versions.
+pub async fn fetch_connections_raw_via(channel: &mut ManagementChannel) -> Result<String, String> {
+    invoke_management::<String>(
+        &mut channel.sender,
+        &mut channel.receiver,
+        &channel.reply_to,
+        "broker",
+        "listConnectionsAsJSON",
+        Body::Value(AmqpValue(Value::String("[]".into()))),
+    ).await
+}
+
+/// List active consumers on the broker, joined to their connection / queue.
+/// Same shape conventions as `list_connections_via`. Used by the inspector
+/// view (grouped by connection or by queue) and by the per-message
+/// "who holds this?" drill-down.
+pub async fn list_consumers_via(channel: &mut ManagementChannel) -> Result<Vec<BrokerConsumer>, String> {
+    let raw = fetch_consumers_raw_via(channel).await?;
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| format!("decode listAllConsumersAsJSON (expected array): {e} — raw: {raw}"))?;
+    Ok(arr.iter().filter_map(parse_consumer_obj).collect())
+}
+
+/// Raw `listAllConsumersAsJSON` payload — same purpose as the connections
+/// raw fetch, used by the inspector debug overlay.
+pub async fn fetch_consumers_raw_via(channel: &mut ManagementChannel) -> Result<String, String> {
+    invoke_management::<String>(
+        &mut channel.sender,
+        &mut channel.receiver,
+        &channel.reply_to,
+        "broker",
+        "listAllConsumersAsJSON",
+        Body::Value(AmqpValue(Value::String("[]".into()))),
+    ).await
 }
 
 pub async fn purge_queue_via(channel: &mut ManagementChannel, queue: &str) -> Result<i64, String> {

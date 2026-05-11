@@ -3,14 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Radar, RotateCcw, Inbox, Send, X, Loader2, Eye,
   Tag, MessageSquare, Search, Trash2, AlertTriangle, CornerUpLeft, ShieldAlert,
+  Users,
 } from "lucide-react";
 import CollapsibleSection from "../CollapsibleSection";
 import PropsList from "../PropsList";
 import EmptyState from "../EmptyState";
 import ViewTopBar from "../ViewTopBar";
 import CopyButton from "../CopyButton";
-import { fmtBytes } from "../../utils/format";
+import { fmtBytes, fmtDuration } from "../../utils/format";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
+import type { BrokerConnection, BrokerConsumer } from "../../types";
 
 interface BrokerQueue {
   name: string;
@@ -492,12 +494,21 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                   className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10 transition-colors">
                   <RotateCcw className={`w-3 h-3 ${peekLoading ? "animate-spin" : ""}`} /> Refresh
                 </button>
-                {isDlqQueueName(selectedQueue) && messages.length > 0 && (
+                {/* On DLQ queues we always render the Requeue-all button so
+                    its location is discoverable even when the queue is
+                    currently empty — the action banner above mentions it, so
+                    a hidden button is confusing. Disabled + tooltip when
+                    there's nothing to requeue. */}
+                {isDlqQueueName(selectedQueue) && (
                   <button
                     onClick={() => requeueMessages(messages)}
-                    disabled={!!requeueProgress || peekLoading}
-                    title={`Republish all ${messages.length} peeked message${messages.length !== 1 ? "s" : ""} to their original destinations`}
-                    className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-blue-500 bg-blue-500/10 hover:bg-blue-500/20 transition-colors disabled:opacity-40"
+                    disabled={!!requeueProgress || peekLoading || messages.length === 0}
+                    title={
+                      messages.length === 0
+                        ? "Queue is empty — nothing to requeue"
+                        : `Republish all ${messages.length} peeked message${messages.length !== 1 ? "s" : ""} to their original destinations`
+                    }
+                    className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-blue-500 bg-blue-500/10 hover:bg-blue-500/20 transition-colors disabled:opacity-40 disabled:hover:bg-blue-500/10"
                   >
                     {requeueProgress
                       ? <><Loader2 className="w-3 h-3 animate-spin" /> Requeue {requeueProgress.done}/{requeueProgress.total}</>
@@ -591,6 +602,7 @@ export default function BrowserView({ connected, visible, onLog, onPublishTo, on
                     <MessageDetails
                       msg={messages[openMessageIdx]}
                       idx={openMessageIdx}
+                      queue={selectedQueue}
                       onLog={onLog}
                       onRequeue={isDlqQueueName(selectedQueue) ? () => requeueMessages([messages[openMessageIdx]!]) : undefined}
                       requeueDisabled={!!requeueProgress}
@@ -699,9 +711,12 @@ function IconBtn({ title, onClick, colorClass, children }: {
   );
 }
 
-function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
+function MessageDetails({ msg, idx, queue, onLog, onRequeue, requeueDisabled }: {
   msg: PeekedMessage;
   idx: number;
+  /** Queue address this message was peeked from — needed by the "who holds
+   *  it?" drill-down to filter the consumer list. */
+  queue: string;
   onLog: (k: "info" | "ok" | "err", t: string) => void;
   /** When set, render a "Requeue this message" button — passed in only for
    *  DLQ queues, so non-DLQ peeks don't grow this UI. */
@@ -713,8 +728,52 @@ function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
   const [appOpen,   setAppOpen]   = useState(true);
   const [bodyMode,  setBodyMode]  = useState<"auto" | "raw" | "hex">("auto");
 
-  // Reset body view-mode when switching message
-  useEffect(() => { setBodyMode("auto"); }, [idx]);
+  // "Who holds this message?" — lazy-loaded consumer list filtered by queue.
+  // Artemis doesn't expose a per-message lock owner via management, but it
+  // does report which consumers have credit currently outstanding against
+  // the queue. That's the practical answer: any consumer with non-zero
+  // `messages_in_transit` against this queue is sitting on (some) messages.
+  const [holderOpen,    setHolderOpen]    = useState(false);
+  const [holderLoading, setHolderLoading] = useState(false);
+  const [holderErr,     setHolderErr]     = useState<string | null>(null);
+  const [holderCons,    setHolderCons]    = useState<BrokerConsumer[]>([]);
+  const [holderConns,   setHolderConns]   = useState<BrokerConnection[]>([]);
+  const [holderAt,      setHolderAt]      = useState<number>(0);
+
+  async function loadHolders() {
+    setHolderLoading(true);
+    setHolderErr(null);
+    try {
+      const [ks, cs] = await Promise.all([
+        invoke<BrokerConsumer[]>("list_broker_consumers"),
+        invoke<BrokerConnection[]>("list_broker_connections"),
+      ]);
+      setHolderCons(ks.filter(k => k.queue === queue || k.address === queue || k.address === `[${queue}]`));
+      setHolderConns(cs);
+      setHolderAt(Date.now());
+    } catch (e) {
+      setHolderErr(String(e));
+    } finally {
+      setHolderLoading(false);
+    }
+  }
+
+  function toggleHolders() {
+    const next = !holderOpen;
+    setHolderOpen(next);
+    if (next && holderAt === 0) {
+      void loadHolders();
+    }
+  }
+
+  // Reset body view-mode + close holder panel when switching message.
+  useEffect(() => {
+    setBodyMode("auto");
+    setHolderOpen(false);
+    setHolderAt(0);
+    setHolderCons([]);
+    setHolderErr(null);
+  }, [idx, queue]);
 
   // Rust's HashMap doesn't preserve insertion order, so sort alphabetically
   // for a stable display — otherwise the same message peeked twice can show
@@ -745,6 +804,18 @@ function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
         )}
         {msg.priority !== null && msg.priority !== 4 && <span className="text-t-ink4">P{msg.priority}</span>}
         {msg.durable && <span className="text-blue-500">durable</span>}
+        <button
+          type="button"
+          onClick={toggleHolders}
+          title="Show consumers currently attached to this queue (Artemis doesn't expose a per-message lock owner — the practical answer is which clients have credit outstanding)"
+          className={`ml-auto flex items-center gap-1 text-[11px] transition-colors px-1.5 py-0.5 rounded ${
+            holderOpen
+              ? "text-blue-500 bg-blue-500/10"
+              : "text-t-ink4 hover:text-blue-500 hover:bg-blue-500/10"
+          }`}
+        >
+          <Users className="w-3 h-3" /> Who holds it?
+        </button>
         {onRequeue && (() => {
           // Discoverable per-message Requeue: shown only on DLQ queues, and
           // only when this message has an origin we can read. Disabled while
@@ -765,6 +836,77 @@ function MessageDetails({ msg, idx, onLog, onRequeue, requeueDisabled }: {
           );
         })()}
       </div>
+
+      {/* "Who holds this message?" panel — lazy-loaded consumer drill-down */}
+      {holderOpen && (
+        <div className="rounded border border-t-line bg-t-card/40 p-2">
+          <div className="flex items-center gap-2 mb-2 text-[11px]">
+            <Users className="w-3 h-3 text-t-ink4" />
+            <span className="text-t-ink2 font-medium">Consumers on this queue</span>
+            <span className="text-t-ink5 font-mono">{holderCons.length}</span>
+            <button
+              type="button"
+              onClick={loadHolders}
+              disabled={holderLoading}
+              title="Refresh"
+              className="ml-auto flex items-center gap-1 text-[10px] text-t-ink4 hover:text-t-ink2 transition-colors px-1 py-0.5 rounded hover:bg-t-hover disabled:opacity-40"
+            >
+              <RotateCcw className={`w-3 h-3 ${holderLoading ? "animate-spin" : ""}`} />
+            </button>
+          </div>
+          {holderLoading && holderCons.length === 0 ? (
+            <div className="text-[11px] text-t-ink5 italic">Loading consumers…</div>
+          ) : holderErr ? (
+            <div className="text-[11px] text-red-500">Failed: {holderErr}</div>
+          ) : holderCons.length === 0 ? (
+            <div className="text-[11px] text-t-ink5">
+              No consumers are currently attached to this queue.{" "}
+              {msg.delivery_count > 0
+                ? <>Message has been redelivered <b>{msg.delivery_count}×</b>, so a previous consumer may have given up.</>
+                : <>Messages will sit here until a consumer subscribes.</>}
+            </div>
+          ) : (
+            <table className="w-full text-[11px] font-mono">
+              <thead className="text-[10px] uppercase tracking-wider text-t-ink5">
+                <tr className="border-b border-t-line/60">
+                  <th className="text-left pb-1 font-semibold">Client</th>
+                  <th className="text-left pb-1 font-semibold w-24">User</th>
+                  <th className="text-right pb-1 font-semibold w-12" title="Credit currently outstanding">Credit</th>
+                  <th className="text-right pb-1 font-semibold w-20">Last RX</th>
+                </tr>
+              </thead>
+              <tbody>
+                {holderCons.map(k => {
+                  const conn = holderConns.find(c => c.connection_id === k.connection_id);
+                  const isHolding = k.messages_in_transit > 0;
+                  const lastRx = k.last_delivered_time > 0
+                    ? `${fmtDuration(Math.max(0, Date.now() - k.last_delivered_time))} ago`
+                    : "—";
+                  return (
+                    <tr key={k.id} className={isHolding ? "bg-blue-500/5" : ""}>
+                      <td className="py-1 text-t-ink2 truncate" title={conn?.client_address ?? k.connection_id}>
+                        {conn?.client_address || k.connection_id || "—"}
+                      </td>
+                      <td className="py-1 text-t-ink3 truncate" title={conn?.users ?? ""}>{conn?.users || "—"}</td>
+                      <td className={`py-1 text-right ${isHolding ? "text-blue-500 font-medium" : "text-t-ink5"}`}>
+                        {k.messages_in_transit}
+                      </td>
+                      <td className="py-1 text-right text-t-ink5">{lastRx}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {holderCons.some(k => k.messages_in_transit > 0) && (
+            <div className="mt-2 text-[10px] text-t-ink5 leading-relaxed">
+              Rows highlighted in blue have unacked credit. They're the most likely
+              candidates for holding this message — but Artemis doesn't expose a per-message
+              lock owner via management, so this is an inference, not a guarantee.
+            </div>
+          )}
+        </div>
+      )}
 
       <CollapsibleSection title="Properties" icon={<Tag className="w-3 h-3" />} open={propsOpen} onToggle={() => setPropsOpen(o => !o)}>
         <PropsList onLog={onLog} items={[

@@ -167,4 +167,38 @@ export interface Template {
   body_schema_xsd?: string | null;
 }
 
-export type View = "publisher" | "subscriber" | "history" | "connection" | "stats" | "console" | "browser";
+export type View = "publisher" | "subscriber" | "history" | "connection" | "stats" | "console" | "browser" | "inspector";
+
+/** One client connection observed by the broker. Matches the `BrokerConnection`
+ *  serde struct in src-tauri/src/broker.rs — Artemis camelCase via rename. */
+export interface BrokerConnection {
+  connection_id: string;
+  client_address: string;
+  users: string;
+  session_count: number;
+  /** ms since epoch */
+  creation_time: number;
+  implementation: string;
+  protocol: string;
+}
+
+/** One consumer attached to a connection / session, listening on a queue.
+ *  Used by the Inspector and the per-message "who holds this?" lookup. */
+export interface BrokerConsumer {
+  id: number;
+  connection_id: string;
+  session_id: string;
+  queue: string;
+  address: string;
+  browse_only: boolean;
+  /** ms since epoch */
+  creation_time: number;
+  messages_in_transit: number;
+  messages_delivered: number;
+  messages_acknowledged: number;
+  /** ms since epoch — 0 if never delivered */
+  last_delivered_time: number;
+  /** ms since epoch — 0 if never acked */
+  last_acknowledged_time: number;
+  protocol: string;
+}

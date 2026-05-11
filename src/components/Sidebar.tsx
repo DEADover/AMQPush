@@ -1,4 +1,4 @@
-import { Send, Inbox, History, Settings2, BarChart2, Terminal, Radar, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Send, Inbox, History, Settings2, BarChart2, Terminal, Radar, Network, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { View } from "../types";
 
 interface Props {
@@ -16,9 +16,10 @@ const ITEMS: { id: View; icon: React.ReactNode; label: string; kbd?: string }[] 
   { id: "publisher",  icon: <Send       className="w-3.5 h-3.5" />, label: "Send",       kbd: "⌘2" },
   { id: "subscriber", icon: <Inbox      className="w-3.5 h-3.5" />, label: "Receive",    kbd: "⌘3" },
   { id: "browser",    icon: <Radar      className="w-3.5 h-3.5" />, label: "Browser",    kbd: "⌘4" },
-  { id: "history",    icon: <History    className="w-3.5 h-3.5" />, label: "History",    kbd: "⌘5" },
-  { id: "stats",      icon: <BarChart2  className="w-3.5 h-3.5" />, label: "Stats",      kbd: "⌘6" },
-  { id: "console",    icon: <Terminal   className="w-3.5 h-3.5" />, label: "Logs",       kbd: "⌘7" },
+  { id: "inspector",  icon: <Network    className="w-3.5 h-3.5" />, label: "Clients",    kbd: "⌘5" },
+  { id: "history",    icon: <History    className="w-3.5 h-3.5" />, label: "History",    kbd: "⌘6" },
+  { id: "stats",      icon: <BarChart2  className="w-3.5 h-3.5" />, label: "Stats",      kbd: "⌘7" },
+  { id: "console",    icon: <Terminal   className="w-3.5 h-3.5" />, label: "Logs",       kbd: "⌘8" },
 ];
 
 const TRANSITION = "transition-[width,opacity] duration-200 ease-out";

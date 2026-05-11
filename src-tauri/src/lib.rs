@@ -15,7 +15,7 @@ mod templates;
 mod dock_icon;
 
 use amqp::{AmqpClient, HistoryEntry, SendResult};
-use broker::{BrokerQueue, ManagementChannel, PeekedMessage};
+use broker::{BrokerConnection, BrokerConsumer, BrokerQueue, ManagementChannel, PeekedMessage};
 use notif_drainer::DrainerHandle;
 use profiles::Profile;
 use queues::SavedQueue;
@@ -461,6 +461,154 @@ async fn ping_broker(state: tauri::State<'_, AppState>) -> Result<u64, String> {
     }
 }
 
+/// List active broker connections (clients currently attached). Surfaces
+/// the data behind the Inspector view. Reuses the long-lived management
+/// channel; on RPC failure we drop it so the next call reopens.
+#[tauri::command]
+async fn list_broker_connections(state: tauri::State<'_, AppState>) -> Result<Vec<BrokerConnection>, String> {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
+        let client = state.client.lock().await;
+        if !client.is_connected() {
+            return Err("Not connected".into());
+        }
+        (
+            client.host.clone(),
+            client.port,
+            client.username.clone(),
+            client.password.clone(),
+            client.use_tls,
+            client.tls_skip_verify,
+        )
+    };
+
+    let mut mgmt_guard = state.mgmt.lock().await;
+    if mgmt_guard.is_none() {
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        *mgmt_guard = Some(chan);
+    }
+    let chan = mgmt_guard.as_mut().expect("just opened");
+    match broker::list_connections_via(chan).await {
+        Ok(list) => Ok(list),
+        Err(e) => {
+            if let Some(c) = mgmt_guard.take() {
+                c.close().await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// List all active consumers attached to the broker. Used by the Inspector
+/// view (grouped by connection / queue) and by the "who holds this message?"
+/// drill-down in the Browser. Reuses the management channel.
+#[tauri::command]
+async fn list_broker_consumers(state: tauri::State<'_, AppState>) -> Result<Vec<BrokerConsumer>, String> {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
+        let client = state.client.lock().await;
+        if !client.is_connected() {
+            return Err("Not connected".into());
+        }
+        (
+            client.host.clone(),
+            client.port,
+            client.username.clone(),
+            client.password.clone(),
+            client.use_tls,
+            client.tls_skip_verify,
+        )
+    };
+
+    let mut mgmt_guard = state.mgmt.lock().await;
+    if mgmt_guard.is_none() {
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        *mgmt_guard = Some(chan);
+    }
+    let chan = mgmt_guard.as_mut().expect("just opened");
+    match broker::list_consumers_via(chan).await {
+        Ok(list) => Ok(list),
+        Err(e) => {
+            if let Some(c) = mgmt_guard.take() {
+                c.close().await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Raw `listConnectionsAsJSON` payload — verbatim broker output. Used by
+/// the Clients view "Raw" debug toggle so the user can see exactly what
+/// the broker reports when fields appear empty (field-name mismatch is
+/// the usual culprit across Artemis versions).
+#[tauri::command]
+async fn fetch_broker_connections_raw(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
+        let client = state.client.lock().await;
+        if !client.is_connected() {
+            return Err("Not connected".into());
+        }
+        (
+            client.host.clone(),
+            client.port,
+            client.username.clone(),
+            client.password.clone(),
+            client.use_tls,
+            client.tls_skip_verify,
+        )
+    };
+
+    let mut mgmt_guard = state.mgmt.lock().await;
+    if mgmt_guard.is_none() {
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        *mgmt_guard = Some(chan);
+    }
+    let chan = mgmt_guard.as_mut().expect("just opened");
+    match broker::fetch_connections_raw_via(chan).await {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            if let Some(c) = mgmt_guard.take() {
+                c.close().await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Raw `listAllConsumersAsJSON` payload. Companion to the connections raw
+/// fetch above.
+#[tauri::command]
+async fn fetch_broker_consumers_raw(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let (host, port, username, password, use_tls, tls_skip_verify) = {
+        let client = state.client.lock().await;
+        if !client.is_connected() {
+            return Err("Not connected".into());
+        }
+        (
+            client.host.clone(),
+            client.port,
+            client.username.clone(),
+            client.password.clone(),
+            client.use_tls,
+            client.tls_skip_verify,
+        )
+    };
+
+    let mut mgmt_guard = state.mgmt.lock().await;
+    if mgmt_guard.is_none() {
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        *mgmt_guard = Some(chan);
+    }
+    let chan = mgmt_guard.as_mut().expect("just opened");
+    match broker::fetch_consumers_raw_via(chan).await {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            if let Some(c) = mgmt_guard.take() {
+                c.close().await;
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Delete every message currently in the queue (destructive — UI must
 /// confirm with the user before invoking). Returns the count of messages
 /// that were removed. Reuses the long-lived management channel so we don't
@@ -757,6 +905,10 @@ pub fn run() {
             peek_messages,
             purge_queue,
             ping_broker,
+            list_broker_connections,
+            list_broker_consumers,
+            fetch_broker_connections_raw,
+            fetch_broker_consumers_raw,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
