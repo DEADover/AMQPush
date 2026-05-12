@@ -10,6 +10,70 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Optional mTLS client certificate. When `cert_path` is set, the TLS
+/// handshake presents this identity to the broker; brokers configured for
+/// mutual TLS will authenticate the connection by it.
+///
+/// Two file-shape conventions are supported, distinguished by extension:
+///   - `.p12` / `.pfx` — PKCS#12 bundle containing the cert + private key.
+///     `key_path` is ignored; `passphrase` decrypts the bundle.
+///   - any other extension — PEM `.crt` (or `.pem`) for the certificate,
+///     plus a separate `key_path` pointing at the unencrypted PKCS#8 PEM
+///     private key. PEM keys themselves can't be passphrase-decrypted
+///     here — use PKCS#12 if your key is encrypted.
+#[derive(Clone, Default, Debug)]
+pub struct ClientCert {
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    pub passphrase: Option<String>,
+}
+
+impl ClientCert {
+    pub fn is_set(&self) -> bool {
+        self.cert_path.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+    }
+}
+
+/// Transport selection. Default is plain AMQP (TCP socket → TLS optional);
+/// when `use_ws` is true, AMQP is tunnelled over a WebSocket — picked up by
+/// brokers behind corporate firewalls that block 5671/5672, plus cloud
+/// brokers like Azure Service Bus, Amazon MQ (RabbitMQ flavour), and
+/// RabbitMQ with the `rabbitmq_web_amqp` plugin.
+///
+/// `ws_path` is the WebSocket URL path component (without leading slash);
+/// default `""` means the broker's root. Some brokers expect a specific
+/// path — e.g. Tanzu RabbitMQ uses `ws` by default.
+#[derive(Clone, Default, Debug)]
+pub struct TransportOpts {
+    pub use_ws: bool,
+    pub ws_path: String,
+}
+
+/// Load a `native_tls::Identity` from disk according to the `ClientCert`
+/// convention above. Returns an error if the cert path is missing, the
+/// file can't be read, or the bundle/PEM is malformed.
+fn load_client_identity(cc: &ClientCert) -> Result<native_tls::Identity, String> {
+    let cert_path = cc.cert_path.as_deref().ok_or("Client cert path is required")?;
+    let cert_bytes = std::fs::read(cert_path)
+        .map_err(|e| format!("Read client cert ({cert_path}): {e}"))?;
+    let lower = cert_path.to_ascii_lowercase();
+    if lower.ends_with(".p12") || lower.ends_with(".pfx") {
+        let pass = cc.passphrase.as_deref().unwrap_or("");
+        native_tls::Identity::from_pkcs12(&cert_bytes, pass)
+            .map_err(|e| format!("Load PKCS#12 identity: {e}"))
+    } else {
+        let key_path = cc.key_path.as_deref().filter(|s| !s.trim().is_empty())
+            .ok_or("PEM client cert requires a separate private-key file")?;
+        let key_bytes = std::fs::read(key_path)
+            .map_err(|e| format!("Read client key ({key_path}): {e}"))?;
+        // Note: native_tls::Identity::from_pkcs8 expects an UNENCRYPTED PKCS#8
+        // PEM key. Encrypted PEM keys aren't supported through this path —
+        // use a PKCS#12 bundle (with passphrase) instead.
+        native_tls::Identity::from_pkcs8(&cert_bytes, &key_bytes)
+            .map_err(|e| format!("Load PEM identity: {e}"))
+    }
+}
+
 // ── result / history ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +123,13 @@ pub struct AmqpClient {
     pub password: String,
     pub use_tls: bool,
     pub tls_skip_verify: bool,
+    /// Optional mTLS client certificate. Cloned into every module that
+    /// needs to open its own AMQP connection (broker mgmt, subscriber,
+    /// notif drainer).
+    pub client_cert: ClientCert,
+    /// Transport choice (plain TCP vs WebSocket) — same propagation as
+    /// `client_cert`. Defaults to plain TCP / TLS.
+    pub transport: TransportOpts,
     /// Stored so `reopen()` can re-establish the connection with the same
     /// settings if the session dies (e.g. after broker idle timeout).
     container_id: String,
@@ -105,6 +176,8 @@ pub async fn open_connection(
     container_id: &str,
     sasl_anonymous: bool,
     heartbeat_secs: u32,
+    client_cert: &ClientCert,
+    transport: &TransportOpts,
 ) -> Result<ConnectionHandle<()>, String> {
     use fe2o3_amqp::sasl_profile::SaslProfile;
 
@@ -122,13 +195,43 @@ pub async fn open_connection(
         });
     }
 
-    if use_tls {
-        // Manual TLS path — lets us configure cert verification on/off.
+    if transport.use_ws {
+        // WebSocket transport. The fe2o3-amqp-ws crate picks ws / wss
+        // automatically from the URL scheme. mTLS via this path isn't
+        // wired through — auto-TLS happens inside tungstenite without
+        // exposing client-identity injection; surface a clear error so
+        // users aren't surprised.
+        if client_cert.is_set() {
+            return Err("mTLS client certificate is not supported on the WebSocket transport yet. \
+                Disable WebSocket transport, or remove the client certificate.".into());
+        }
+        let scheme = if use_tls { "wss" } else { "ws" };
+        let path = transport.ws_path.trim_start_matches('/');
+        let url = if path.is_empty() {
+            format!("{scheme}://{host}:{port}")
+        } else {
+            format!("{scheme}://{host}:{port}/{path}")
+        };
+        let ws_stream = fe2o3_amqp_ws::WebSocketStream::connect(&url)
+            .await
+            .map_err(|e| format!("WebSocket connect ({url}): {e}"))?;
+        builder
+            .hostname(host)
+            .open_with_stream(ws_stream)
+            .await
+            .map_err(|e| format!("AMQP open over WebSocket: {e}"))
+    } else if use_tls {
+        // Manual TLS path — lets us configure cert verification on/off and
+        // optionally present a client certificate (mTLS).
         let mut tls_builder = native_tls::TlsConnector::builder();
         if tls_skip_verify {
             tls_builder
                 .danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true);
+        }
+        if client_cert.is_set() {
+            let identity = load_client_identity(client_cert)?;
+            tls_builder.identity(identity);
         }
         let tls = tls_builder
             .build()
@@ -175,6 +278,8 @@ impl AmqpClient {
             password: String::new(),
             use_tls: false,
             tls_skip_verify: false,
+            client_cert: ClientCert::default(),
+            transport: TransportOpts::default(),
             container_id: String::new(),
             sasl_anonymous: false,
             heartbeat_secs: 0,
@@ -198,6 +303,8 @@ impl AmqpClient {
         connect_timeout_secs: u32,
         sasl_anonymous: bool,
         tls_skip_verify: bool,
+        client_cert: ClientCert,
+        transport: TransportOpts,
     ) -> Result<(), String> {
         self.disconnect().await.ok();
 
@@ -214,6 +321,7 @@ impl AmqpClient {
             host, port, username, password,
             use_tls, tls_skip_verify,
             cid, sasl_anonymous, heartbeat_secs,
+            &client_cert, &transport,
         );
         let mut connection = if connect_timeout_secs > 0 {
             tokio::time::timeout(
@@ -250,6 +358,8 @@ impl AmqpClient {
         self.password = password.to_string();
         self.use_tls = use_tls;
         self.tls_skip_verify = tls_skip_verify;
+        self.client_cert = client_cert;
+        self.transport = transport;
         self.container_id = cid.to_string();
         self.sasl_anonymous = sasl_anonymous;
         self.heartbeat_secs = heartbeat_secs;
@@ -280,6 +390,7 @@ impl AmqpClient {
             &self.host, self.port, &self.username, &self.password,
             self.use_tls, self.tls_skip_verify,
             &new_cid, self.sasl_anonymous, self.heartbeat_secs,
+            &self.client_cert, &self.transport,
         )
         .await
         .map_err(|e| format!("Reopen connection: {e}"))?;

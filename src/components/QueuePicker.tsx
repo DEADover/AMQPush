@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, RotateCcw, Radar, X, AlertCircle, Check } from "lucide-react";
+import { ChevronDown, RotateCcw, Radar, X, AlertCircle, Check, Clock } from "lucide-react";
 import SectionLabel from "./SectionLabel";
+import { readRecentQueues, forgetRecentQueue, type RecentQueueEntry } from "../utils/recentQueues";
 
 interface BrokerQueue {
   name: string;
@@ -19,6 +20,9 @@ interface Props {
   disabled?: boolean;
   placeholder?: string;
   className?: string;
+  /** Active profile name — drives the per-profile Recent queues MRU list.
+   *  Omitted/empty → Recent section is hidden. */
+  profileName?: string;
   /** @deprecated — bookmarks were removed; prop kept for backward compatibility */
   showSave?: boolean;
   /** @deprecated — kept for backward compatibility */
@@ -29,13 +33,24 @@ export default function QueuePicker({
   value, onChange, connected = false, disabled,
   placeholder = "queue or address",
   className = "",
+  profileName = "",
 }: Props) {
   const [brokerQueues,   setBrokerQueues]   = useState<BrokerQueue[]>([]);
   const [open,           setOpen]           = useState(false);
   const [brokerLoading,  setBrokerLoading]  = useState(false);
   const [brokerErr,      setBrokerErr]      = useState<string | null>(null);
   const [brokerLoadedAt, setBrokerLoadedAt] = useState<number | null>(null);
+  // Recent queues MRU — loaded from localStorage on open and after the
+  // user forgets one. Filtered by the input query alongside broker queues.
+  const [recent, setRecent] = useState<RecentQueueEntry[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Refresh the recent list whenever we open the dropdown or switch profile,
+  // so a queue that was just sent shows up immediately next time the picker
+  // is opened.
+  useEffect(() => {
+    if (open) setRecent(readRecentQueues(profileName));
+  }, [open, profileName]);
 
   async function loadBroker(silent = false) {
     if (!connected) return;
@@ -84,7 +99,23 @@ export default function QueuePicker({
     [brokerQueues, q]
   );
 
+  // Recent queues filtered by current query. We also drop recent entries
+  // that the broker has just confirmed (so the same address doesn't appear
+  // twice in the dropdown — broker listing wins, recent is for things not
+  // yet discovered).
+  const filteredRecent = useMemo(() => {
+    const brokerAddrs = new Set(brokerQueues.map(b => b.address));
+    return recent
+      .filter(e => !brokerAddrs.has(e.address))
+      .filter(e => !q || e.address.toLowerCase().includes(q));
+  }, [recent, brokerQueues, q]);
+
   const showLiveBadge = connected && brokerLoadedAt !== null;
+
+  function forget(addr: string) {
+    forgetRecentQueue(profileName, addr);
+    setRecent(readRecentQueues(profileName));
+  }
 
   return (
     <div ref={containerRef} className={`relative flex items-center gap-1 ${className}`}>
@@ -150,6 +181,52 @@ export default function QueuePicker({
               <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
               <span className="break-all">{brokerErr}</span>
             </div>
+          )}
+
+          {/* Recent — MRU list of addresses the user has actually sent to /
+              subscribed from with this profile. Hidden when empty or when
+              the picker has no profile context. Each row has a × forget
+              button (hover) so stale entries can be pruned. */}
+          {filteredRecent.length > 0 && (
+            <>
+              <div className="flex items-center gap-2 px-3 py-1 border-b border-t-line bg-t-panel/60">
+                <SectionLabel icon={<Clock className="w-3 h-3" />}>Recent</SectionLabel>
+                <span className="text-[10px] text-t-ink5 font-mono">{filteredRecent.length}</span>
+              </div>
+              <div className="max-h-40 overflow-y-auto border-b border-t-line">
+                {filteredRecent.map(e => {
+                  const isCurrent = value === e.address;
+                  return (
+                    <div key={e.address}
+                      className={`group flex items-center gap-2 px-3 py-1.5 transition-colors ${
+                        isCurrent ? "bg-blue-500/10" : "hover:bg-t-hover/50"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => { onChange(e.address); setOpen(false); }}
+                        className={`flex-1 min-w-0 text-left text-[12px] font-mono truncate ${
+                          isCurrent ? "text-blue-500" : "text-t-ink2 group-hover:text-t-ink"
+                        }`}
+                        title={e.address}
+                      >
+                        {e.address}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(ev) => { ev.stopPropagation(); forget(e.address); }}
+                        title="Forget this recent queue"
+                        aria-label={`Forget ${e.address}`}
+                        className="shrink-0 opacity-0 group-hover:opacity-100 text-t-ink5 hover:text-red-500 transition-all p-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                      {isCurrent && <Check className="w-3 h-3 text-blue-500 shrink-0" />}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
           )}
 
           {/* Table header — visible when there are entries */}

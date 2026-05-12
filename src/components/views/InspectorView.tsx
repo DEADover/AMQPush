@@ -199,7 +199,7 @@ export default function InspectorView({ connected, visible, onLog }: Props) {
     <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-t-bg overflow-hidden">
       <ViewTopBar
         icon={<Network className="w-3.5 h-3.5" />}
-        title="Clients"
+        title="Broker Clients"
         count={loaded && !err ? `${conns.length} active · ${visibleCons.length} consumers${hiddenCount > 0 && !showInternal ? ` (+${hiddenCount} internal)` : ""}` : undefined}
         status={
           connected && autoOn && loaded ? (

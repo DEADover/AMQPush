@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, Save, Trash2, Plug, Unplug, Loader2, Settings2, Plus, Copy, CheckCircle, XCircle, Info, Activity, SlidersHorizontal, Sliders } from "lucide-react";
+import { ChevronDown, Save, Trash2, Plug, Unplug, Loader2, Settings2, Plus, Copy, CheckCircle, XCircle, Info, Activity, SlidersHorizontal, Sliders, FolderOpen, AlertTriangle } from "lucide-react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { Profile, LogEntry } from "../../types";
 import Tabs, { TabItem } from "../Tabs";
 import ViewTopBar from "../ViewTopBar";
@@ -34,6 +35,18 @@ export interface ConnForm {
   reconnectBaseMs: string;
   reconnectMaxMs: string;
   reconnectMultiplier: string;
+
+  // mTLS client certificate (optional). Empty strings = no client cert.
+  // Cert path is either a PEM `.crt` (in which case key path is required)
+  // or a PKCS#12 `.p12`/`.pfx` bundle (in which case passphrase is used and
+  // key path is ignored).
+  clientCertPath: string;
+  clientKeyPath: string;
+  clientKeyPassphrase: string;
+
+  // WebSocket transport (ws:// or wss://) — opt-in, defaults to plain TCP.
+  useWs: boolean;
+  wsPath: string;
 }
 
 interface Props {
@@ -71,6 +84,11 @@ const DEFAULTS: ConnForm = {
   reconnectBaseMs: "1000",
   reconnectMaxMs: "30000",
   reconnectMultiplier: "2",
+  clientCertPath: "",
+  clientKeyPath: "",
+  clientKeyPassphrase: "",
+  useWs: false,
+  wsPath: "",
 };
 
 // Heuristic: which log entries are "connection-related" — to filter the activity panel
@@ -89,6 +107,13 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
   const { host, port, username, password, queue, useTls } = form;
   const { containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace } = form;
   const { reconnectBaseMs, reconnectMaxMs, reconnectMultiplier } = form;
+  const { clientCertPath, clientKeyPath, clientKeyPassphrase } = form;
+  const setClientCertPath       = (v: string) => setForm(f => ({ ...f, clientCertPath: v }));
+  const setClientKeyPath        = (v: string) => setForm(f => ({ ...f, clientKeyPath: v }));
+  const setClientKeyPassphrase  = (v: string) => setForm(f => ({ ...f, clientKeyPassphrase: v }));
+  const { useWs, wsPath } = form;
+  const setUseWs                = (v: boolean) => setForm(f => ({ ...f, useWs: v }));
+  const setWsPath               = (v: string)  => setForm(f => ({ ...f, wsPath: v }));
   const setHost     = (v: string) => setForm(f => ({ ...f, host: v }));
   const setPort     = (v: string) => setForm(f => ({ ...f, port: v }));
   const setUsername = (v: string) => setForm(f => ({ ...f, username: v }));
@@ -105,17 +130,45 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
   const setReconnectMaxMs     = (v: string)  => setForm(f => ({ ...f, reconnectMaxMs: v }));
   const setReconnectMult      = (v: string)  => setForm(f => ({ ...f, reconnectMultiplier: v }));
 
-  // Existing workspace labels (deduped) — used as datalist suggestions in the
-  // workspace input. Always includes "Default" so the user has at least one
-  // pre-filled choice on a fresh install.
-  const workspaceSuggestions = useMemo(() => {
-    const set = new Set<string>(["Default"]);
+  // Existing workspace labels (deduped) + how many profiles each one holds.
+  // Counts drive the workspace combobox's delete affordance — deleting a
+  // workspace moves all its profiles back to "Default" rather than removing
+  // them, so the user needs to see the headcount before confirming.
+  const workspaceUsage = useMemo(() => {
+    const counts = new Map<string, number>();
+    counts.set("Default", 0); // always show even when no profile uses it
     for (const p of profiles) {
-      const ws = (p.workspace ?? "").trim();
-      if (ws) set.add(ws);
+      const ws = ((p.workspace ?? "").trim() || "Default");
+      counts.set(ws, (counts.get(ws) ?? 0) + 1);
     }
-    return [...set].sort((a, b) => a === "Default" ? 1 : b === "Default" ? -1 : a.localeCompare(b));
+    return counts;
   }, [profiles]);
+  const workspaceSuggestions = useMemo(() => {
+    return [...workspaceUsage.keys()].sort(
+      (a, b) => a === "Default" ? 1 : b === "Default" ? -1 : a.localeCompare(b),
+    );
+  }, [workspaceUsage]);
+
+  // Delete a workspace by moving every profile under it back to "Default".
+  // Called from WorkspaceCombobox; iterates through profiles and saves each
+  // updated copy, then refreshes the list. Also rewrites the open form's
+  // workspace field if it happened to match — otherwise saving the current
+  // edit would re-create the workspace immediately.
+  async function deleteWorkspace(name: string): Promise<void> {
+    const affected = profiles.filter(p => ((p.workspace ?? "").trim() || "Default") === name);
+    for (const p of affected) {
+      try {
+        await invoke("save_profile", { profile: { ...p, workspace: "Default" } });
+      } catch (e) {
+        onLog("err", `Workspace move (${p.name}): ${String(e)}`);
+      }
+    }
+    if ((workspace.trim() || "Default") === name) {
+      setWorkspace("Default");
+    }
+    await onProfilesChanged();
+    onLog("info", `Workspace '${name}' deleted — ${affected.length} profile${affected.length === 1 ? "" : "s"} moved to Default`);
+  }
 
   const [tab, setTab] = useState<MainTab>("main");
   // Detect if any "Advanced" field has a non-default value — show a dot on the Advanced tab
@@ -125,7 +178,10 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
     tlsSkipVerify ||
     !!containerId ||
     (Number(heartbeatSecs) || 0) > 0 ||
-    (Number(connectTimeoutSecs) || 10) !== 10;
+    (Number(connectTimeoutSecs) || 10) !== 10 ||
+    !!clientCertPath ||
+    !!clientKeyPath ||
+    !!clientKeyPassphrase;
 
   const logsBottomRef = useRef<HTMLDivElement>(null);
 
@@ -162,6 +218,11 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       reconnectBaseMs:    p.reconnect_base_ms !== undefined ? String(p.reconnect_base_ms) : "1000",
       reconnectMaxMs:     p.reconnect_max_ms !== undefined ? String(p.reconnect_max_ms) : "30000",
       reconnectMultiplier: p.reconnect_multiplier !== undefined ? String(p.reconnect_multiplier) : "2",
+      clientCertPath:     p.client_cert_path ?? "",
+      clientKeyPath:      p.client_key_path ?? "",
+      clientKeyPassphrase: p.client_key_passphrase ?? "",
+      useWs:              p.use_ws ?? false,
+      wsPath:             p.ws_path ?? "",
     });
   }
 
@@ -194,10 +255,17 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
         || ((loaded.workspace ?? "").trim() || "Default") !== (workspace.trim() || "Default")
         || (loaded.reconnect_base_ms ?? 1000) !== (Number(reconnectBaseMs) || 1000)
         || (loaded.reconnect_max_ms ?? 30000) !== (Number(reconnectMaxMs) || 30000)
-        || (loaded.reconnect_multiplier ?? 2) !== (Number(reconnectMultiplier) || 2);
+        || (loaded.reconnect_multiplier ?? 2) !== (Number(reconnectMultiplier) || 2)
+        || (loaded.client_cert_path ?? "") !== clientCertPath
+        || (loaded.client_key_path ?? "") !== clientKeyPath
+        || (loaded.client_key_passphrase ?? "") !== clientKeyPassphrase
+        || (loaded.use_ws ?? false) !== useWs
+        || (loaded.ws_path ?? "") !== wsPath;
   }, [loaded, host, port, username, password, queue, useTls,
       containerId, heartbeatSecs, connectTimeoutSecs, tlsSkipVerify, saslAnonymous, workspace,
-      reconnectBaseMs, reconnectMaxMs, reconnectMultiplier]);
+      reconnectBaseMs, reconnectMaxMs, reconnectMultiplier,
+      clientCertPath, clientKeyPath, clientKeyPassphrase,
+      useWs, wsPath]);
 
   function buildProfile(name: string): Profile {
     return {
@@ -217,6 +285,11 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
       reconnect_base_ms: Math.max(0, Number(reconnectBaseMs) || 1000),
       reconnect_max_ms: Math.max(0, Number(reconnectMaxMs) || 30000),
       reconnect_multiplier: Math.max(1.01, Number(reconnectMultiplier) || 2),
+      client_cert_path: clientCertPath.trim(),
+      client_key_path: clientKeyPath.trim(),
+      client_key_passphrase: clientKeyPassphrase,
+      use_ws: useWs,
+      ws_path: wsPath.trim(),
     };
   }
 
@@ -304,6 +377,11 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
         reconnectBaseMs:    Math.max(0, Number(reconnectBaseMs) || 1000),
         reconnectMaxMs:     Math.max(0, Number(reconnectMaxMs) || 30000),
         reconnectMultiplier: Math.max(1.01, Number(reconnectMultiplier) || 2),
+        clientCertPath: clientCertPath.trim() || null,
+        clientKeyPath: clientKeyPath.trim() || null,
+        clientKeyPassphrase: clientKeyPassphrase || null,
+        useWs,
+        wsPath: wsPath.trim() || null,
       });
       onConnected(queue);
       onLog("ok", `Connected → ${host}:${port}${queue ? `  (${queue})` : ""}`);
@@ -510,20 +588,19 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
           </div>
           {/* Workspace — groups this profile under a named bucket in the
               header picker and Cmd+K palette. Free-form text with autocomplete
-              from existing workspaces; "Default" is the canonical fallback. */}
+              from existing workspaces; "Default" is the canonical fallback.
+              We avoid the native `<datalist>` here because WebKit (Tauri's
+              renderer) styles its dropdown unreadably — white-on-white text.
+              Custom combobox matches the rest of the app's look. */}
           <div className="mt-3">
             <label className={LABEL} htmlFor="profile-workspace">Workspace</label>
-            <input
-              id="profile-workspace"
-              list="amqpush-workspaces"
+            <WorkspaceCombobox
               value={workspace}
-              onChange={e => setWorkspace(e.target.value)}
-              placeholder="Default"
-              className={INPUT}
+              onChange={setWorkspace}
+              suggestions={workspaceSuggestions}
+              usage={workspaceUsage}
+              onDelete={deleteWorkspace}
             />
-            <datalist id="amqpush-workspaces">
-              {workspaceSuggestions.map(w => <option key={w} value={w} />)}
-            </datalist>
             <p className="text-[10px] text-t-ink5 mt-1">
               Profiles are grouped by workspace in the header picker and Cmd+K palette.
             </p>
@@ -563,13 +640,45 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
           )}
 
           {/* Force SASL ANONYMOUS — same toggle-card style */}
-          <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line">
+          <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line mb-2">
             <div className="flex flex-col">
               <span className="text-[13px] text-t-ink2">Force SASL ANONYMOUS</span>
               <span className="text-[10px] text-t-ink5">Skip credentials and connect anonymously</span>
             </div>
             <Toggle checked={saslAnonymous} onChange={setSaslAnonymous} ariaLabel="Force SASL ANONYMOUS" />
           </div>
+
+          {/* WebSocket transport — opt-in. AMQP rides over ws:// (or wss://
+              when TLS is also on). Useful behind firewalls that block raw
+              5671/5672, and for cloud brokers (Azure SB, Amazon MQ, etc.). */}
+          <div className="flex items-center justify-between p-2.5 rounded-lg bg-t-card border border-t-line">
+            <div className="flex flex-col">
+              <span className="text-[13px] text-t-ink2">AMQP over WebSocket</span>
+              <span className="text-[10px] text-t-ink5">
+                Tunnel AMQP through {useTls ? "wss" : "ws"}://host:port{wsPath ? `/${wsPath}` : ""}
+              </span>
+            </div>
+            <Toggle checked={useWs} onChange={setUseWs} ariaLabel="AMQP over WebSocket" />
+          </div>
+
+          {/* WebSocket URL path — sub-option, only when WS on */}
+          {useWs && (
+            <div className="px-2.5 mt-2">
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-semibold text-t-ink4 uppercase tracking-wider">
+                  WS path
+                  <span className="text-t-ink5 normal-case font-normal"> — optional; broker-specific (e.g. <span className="font-mono">ws</span> for some RabbitMQ setups)</span>
+                </span>
+                <input
+                  value={wsPath}
+                  onChange={e => setWsPath(e.target.value)}
+                  placeholder="(empty → root /)"
+                  spellCheck={false}
+                  className={`${INPUT} font-mono`}
+                />
+              </label>
+            </div>
+          )}
         </div>
         </>}
 
@@ -664,6 +773,123 @@ export default function ConnectionView({ connected, form, setForm, logs, profile
             </p>
           </div>
         </div>
+
+        {/* mTLS client certificate — opt-in mutual TLS. Only meaningful with
+            server-side TLS on; otherwise the cert has no transport to ride. */}
+        <div className="mb-4">
+          <SectionLabel className="block mb-2">mTLS client certificate</SectionLabel>
+          {!useTls && (
+            // Inline warning instead of silently dimming the card — makes
+            // it obvious *why* the fields are inert and exactly which toggle
+            // unlocks them.
+            <div className="flex items-start gap-2 px-3 py-2 mb-2 rounded-md bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-500 leading-relaxed">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                <b>TLS / AMQPS</b> is off — enable it under <b>General → Security</b> to use a client
+                certificate. The cert rides on top of server TLS, so without server TLS there's
+                nothing to attach it to.
+              </span>
+            </div>
+          )}
+          <div className={`bg-t-card border border-t-line rounded-lg p-3 space-y-3 ${useTls ? "" : "opacity-50"}`}>
+            <div>
+              <label className={LABEL}>
+                Certificate file
+                <span className="text-t-ink5 normal-case font-normal"> — PEM <span className="font-mono">.crt</span> / <span className="font-mono">.pem</span> or PKCS#12 <span className="font-mono">.p12</span> / <span className="font-mono">.pfx</span></span>
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  value={clientCertPath}
+                  onChange={e => setClientCertPath(e.target.value)}
+                  disabled={!useTls}
+                  placeholder="/path/to/client.crt or /path/to/bundle.p12"
+                  spellCheck={false}
+                  className={`${INPUT} font-mono disabled:opacity-50 flex-1`}
+                />
+                <button
+                  type="button"
+                  disabled={!useTls}
+                  onClick={async () => {
+                    const f = await openFileDialog({
+                      multiple: false,
+                      directory: false,
+                      title: "Pick client certificate",
+                      filters: [
+                        { name: "Certificates", extensions: ["crt", "pem", "cer", "p12", "pfx"] },
+                        { name: "All files", extensions: ["*"] },
+                      ],
+                    });
+                    if (typeof f === "string") setClientCertPath(f);
+                  }}
+                  title="Browse for certificate file"
+                  aria-label="Browse for certificate file"
+                  className="shrink-0 h-9 px-2.5 rounded-md border border-t-line2 bg-t-card text-t-ink3 hover:text-t-ink hover:bg-t-hover transition-colors text-[12px] flex items-center disabled:opacity-50"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={LABEL}>
+                  Private key file
+                  <span className="text-t-ink5 normal-case font-normal"> — PEM only; ignored for <span className="font-mono">.p12</span></span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    value={clientKeyPath}
+                    onChange={e => setClientKeyPath(e.target.value)}
+                    disabled={!useTls}
+                    placeholder="/path/to/client.key"
+                    spellCheck={false}
+                    className={`${INPUT} font-mono disabled:opacity-50 flex-1`}
+                  />
+                  <button
+                    type="button"
+                    disabled={!useTls}
+                    onClick={async () => {
+                      const f = await openFileDialog({
+                        multiple: false,
+                        directory: false,
+                        title: "Pick private key",
+                        filters: [
+                          { name: "Keys", extensions: ["key", "pem"] },
+                          { name: "All files", extensions: ["*"] },
+                        ],
+                      });
+                      if (typeof f === "string") setClientKeyPath(f);
+                    }}
+                    title="Browse for private key file"
+                    aria-label="Browse for private key file"
+                    className="shrink-0 h-9 px-2.5 rounded-md border border-t-line2 bg-t-card text-t-ink3 hover:text-t-ink hover:bg-t-hover transition-colors text-[12px] flex items-center disabled:opacity-50"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className={LABEL}>
+                  Passphrase
+                  <span className="text-t-ink5 normal-case font-normal"> — PKCS#12 only</span>
+                </label>
+                <input
+                  type="password"
+                  value={clientKeyPassphrase}
+                  onChange={e => setClientKeyPassphrase(e.target.value)}
+                  disabled={!useTls}
+                  placeholder="optional"
+                  className={`${INPUT} disabled:opacity-50`}
+                />
+              </div>
+            </div>
+            <p className="text-[10px] text-t-ink5 leading-relaxed">
+              Used for <strong className="text-t-ink4">mutual TLS</strong> — broker authenticates
+              the client by certificate. PEM keys must be unencrypted PKCS#8 (convert with{" "}
+              <span className="font-mono">openssl pkcs8 -topk8 -nocrypt</span>); use a PKCS#12 bundle
+              with a passphrase if your key is encrypted. Leave all three blank to skip mTLS.
+            </p>
+          </div>
+        </div>
         </>}
       </div>
 
@@ -727,6 +953,171 @@ function ActivityPanel({ logs, bottomRef }: { logs: LogEntry[]; bottomRef: React
               <div ref={bottomRef} />
             </>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Tiny combobox for the Workspace field — free-form text input with a
+ * dropdown of known workspaces. Built by hand instead of `<datalist>`
+ * because WebKit renders datalist options as white-on-white in Tauri's
+ * theme, which is unusable.
+ *
+ * Behavior:
+ *   - Clicking the input or the caret opens the suggestion list.
+ *   - Typing filters the suggestion list by substring.
+ *   - Clicking a suggestion fills the input and closes the list.
+ *   - Click outside or Escape closes the list.
+ *   - The list is always anchored under the input with absolute positioning
+ *     and a `z-30` so it floats above the form below.
+ */
+function WorkspaceCombobox({ value, onChange, suggestions, usage, onDelete }: {
+  value: string;
+  onChange: (v: string) => void;
+  suggestions: string[];
+  /** Per-workspace profile count — drives the count badge and decides
+   *  whether a delete confirmation needs to mention reassigning profiles. */
+  usage: Map<string, number>;
+  /** Move every profile in this workspace back to "Default" and refresh. */
+  onDelete: (name: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  // Workspace name currently in "are you sure?" mode. Inline confirm avoids
+  // pulling in a modal for a tiny destructive-ish action.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setConfirmDelete(null);
+      }
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+
+  const q = value.trim().toLowerCase();
+  const filtered = q
+    ? suggestions.filter(s => s.toLowerCase().includes(q))
+    : suggestions;
+
+  async function doDelete(name: string) {
+    setDeleting(true);
+    try {
+      await onDelete(name);
+    } finally {
+      setDeleting(false);
+      setConfirmDelete(null);
+    }
+  }
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <input
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={e => { if (e.key === "Escape") { setOpen(false); setConfirmDelete(null); } }}
+        placeholder="Default"
+        // Same INPUT classes as everywhere else in this view, plus padding
+        // on the right to make room for the caret button.
+        className="w-full bg-t-field border border-t-line2 rounded-md pl-3 pr-8 py-1.5 text-[13px] text-t-ink outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all placeholder:text-t-ink5 box-border h-9 appearance-none"
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        onClick={() => setOpen(o => !o)}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-t-ink4 hover:text-t-ink2 transition-colors"
+        aria-label="Toggle workspace suggestions"
+      >
+        <ChevronDown className={`w-3.5 h-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && filtered.length > 0 && (
+        <div className="absolute top-full left-0 right-0 mt-1 z-30 bg-t-card border border-t-line rounded-md shadow-lg overflow-hidden max-h-56 overflow-y-auto">
+          {filtered.map(w => {
+            const isCurrent = w === value;
+            const count = usage.get(w) ?? 0;
+            // "Default" is the canonical fallback bucket — it can't be
+            // deleted (there's nowhere to reassign its profiles to).
+            const deletable = w !== "Default";
+
+            // Confirm row replaces the regular row in-place.
+            if (confirmDelete === w) {
+              return (
+                <div
+                  key={w}
+                  onMouseDown={e => e.preventDefault()}
+                  className="flex items-center gap-2 px-3 py-2 text-[11px] bg-red-500/5 border-b border-red-500/20"
+                >
+                  <span className="text-t-ink2 flex-1 min-w-0 truncate">
+                    Delete <b className="text-t-ink">{w}</b>?
+                    {count > 0 && <> Moves {count} profile{count === 1 ? "" : "s"} → Default.</>}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(null)}
+                    disabled={deleting}
+                    className="px-2 py-0.5 rounded text-t-ink4 hover:text-t-ink2 hover:bg-t-hover transition-colors disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => doDelete(w)}
+                    disabled={deleting}
+                    className="px-2 py-0.5 rounded text-red-500 bg-red-500/10 hover:bg-red-500/20 transition-colors disabled:opacity-40 flex items-center gap-1"
+                  >
+                    {deleting && <Loader2 className="w-3 h-3 animate-spin" />}
+                    Delete
+                  </button>
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key={w}
+                onMouseDown={e => e.preventDefault()}
+                className={`group flex items-center gap-2 px-3 py-1.5 text-[12px] transition-colors ${
+                  isCurrent ? "bg-blue-500/10" : "hover:bg-t-hover"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => { onChange(w); setOpen(false); }}
+                  className={`flex-1 min-w-0 text-left truncate ${
+                    isCurrent ? "text-blue-500" : "text-t-ink2 group-hover:text-t-ink"
+                  }`}
+                >
+                  {w}
+                </button>
+                <span className="shrink-0 text-[10px] font-mono text-t-ink5 tabular-nums">
+                  {count}
+                </span>
+                {deletable ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(w)}
+                    title={`Delete workspace '${w}'`}
+                    aria-label={`Delete workspace ${w}`}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 text-t-ink5 hover:text-red-500 transition-all"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                ) : (
+                  // Placeholder keeps the count column aligned with the
+                  // deletable rows. Same intrinsic size as the Trash2 icon.
+                  <span aria-hidden className="shrink-0 w-3 h-3" />
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

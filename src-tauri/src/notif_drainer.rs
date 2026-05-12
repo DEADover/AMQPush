@@ -39,6 +39,8 @@ struct DrainerParams {
     password: String,
     use_tls: bool,
     tls_skip_verify: bool,
+    client_cert: crate::amqp::ClientCert,
+    transport: crate::amqp::TransportOpts,
 }
 
 async fn open(p: &DrainerParams) -> Result<(
@@ -50,6 +52,7 @@ async fn open(p: &DrainerParams) -> Result<(
         &p.host, p.port, &p.username, &p.password,
         p.use_tls, p.tls_skip_verify,
         "amqpush-notif", false, 0,
+        &p.client_cert, &p.transport,
     )
     .await
     .map_err(|e| format!("Notif drainer connection failed: {e}"))?;
@@ -74,6 +77,7 @@ async fn open(p: &DrainerParams) -> Result<(
 /// caller should treat that as non-fatal (broker may not have notifications,
 /// or auth may forbid the address). After a successful start, the task
 /// reconnects automatically on transport errors.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     host: &str,
     port: u16,
@@ -81,6 +85,8 @@ pub async fn start(
     password: &str,
     use_tls: bool,
     tls_skip_verify: bool,
+    client_cert: crate::amqp::ClientCert,
+    transport: crate::amqp::TransportOpts,
 ) -> Result<DrainerHandle, String> {
     let params = DrainerParams {
         host: host.to_string(),
@@ -89,6 +95,8 @@ pub async fn start(
         password: password.to_string(),
         use_tls,
         tls_skip_verify,
+        client_cert,
+        transport,
     };
 
     let (receiver, connection, session) = open(&params).await?;

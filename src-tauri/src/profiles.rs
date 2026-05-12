@@ -66,6 +66,27 @@ pub struct Profile {
     #[serde(default = "default_reconnect_multiplier")]
     pub reconnect_multiplier: f64,
 
+    // ── mTLS client certificate (optional) ─────────────────────────────
+    // Path to a PEM `.crt` or a PKCS#12 `.p12` bundle. The file extension
+    // picks the loader. `client_key_path` is required for PEM, ignored for
+    // PKCS#12. `client_key_passphrase` decrypts the PKCS#12 bundle.
+    #[serde(default)]
+    pub client_cert_path: String,
+    #[serde(default)]
+    pub client_key_path: String,
+    #[serde(default)]
+    pub client_key_passphrase: String,
+
+    // ── AMQP-over-WebSocket transport (optional) ───────────────────────
+    // When `use_ws` is true, AMQP rides over ws://host:port/<path> (or
+    // wss:// when `use_tls` is also on) instead of raw TCP. Useful behind
+    // corporate firewalls and for cloud brokers (Azure SB, Amazon MQ,
+    // RabbitMQ with rabbitmq_web_amqp plugin).
+    #[serde(default)]
+    pub use_ws: bool,
+    #[serde(default)]
+    pub ws_path: String,
+
     /// Catch-all for fields not modelled here. Without it, hand-edited custom
     /// keys (or fields from a newer AMQPush version) would be silently dropped
     /// on the first `save_profile`. With `#[serde(flatten)]` they ride
@@ -100,6 +121,11 @@ impl Default for Profile {
             reconnect_base_ms: default_reconnect_base_ms(),
             reconnect_max_ms: default_reconnect_max_ms(),
             reconnect_multiplier: default_reconnect_multiplier(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            client_key_passphrase: String::new(),
+            use_ws: false,
+            ws_path: String::new(),
             extra: HashMap::new(),
         }
     }

@@ -11,6 +11,7 @@ import { PropertyRow, SendResult, Template } from "../../types";
 import QueuePicker from "../QueuePicker";
 import { applyVariables, runPreScript, VARIABLE_HINTS, UserVariable } from "../../utils/variables";
 import { fmtBytes, fmtDuration } from "../../utils/format";
+import { recordRecentQueue } from "../../utils/recentQueues";
 import Ajv, { ErrorObject } from "ajv";
 import CodeEditor, { VariableSuggestion } from "../CodeEditor";
 import TokenInput from "../TokenInput";
@@ -767,8 +768,12 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
             profile: activeProfile || null,
           });
           ok++;
-          totalBytes += new TextEncoder().encode(body).length;
+          const rowBytes = new TextEncoder().encode(body).length;
+          totalBytes += rowBytes;
           sampleSend();
+          // Per-row Stats tracking, mirroring the regular batch path —
+          // otherwise a 500-row CSV reads as a single send in the dashboard.
+          onSent(rowBytes, address.trim(), rawType);
           if (i < 5 || i === total - 1) {
             onLog("ok", `CSV row ${i + 1}/${total} → ${result.address}  |  ${result.message_id}`);
           }
@@ -779,7 +784,8 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
         setCsvProgress({ done: i + 1, total, ok, failed });
       }
 
-      onSent(totalBytes, address.trim(), rawType);
+      // CSV bulk batch counts as one usage of this destination.
+      if (ok > 0) recordRecentQueue(activeProfile, address.trim());
       const durationMs = Date.now() - startedAt;
       onLog(failed === 0 ? "ok" : "err",
         `CSV batch done: ${ok}/${total} sent` +
@@ -908,11 +914,16 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
           mode === "binary" ? (file?.size ?? 0) : 0;
         totalBytes += bytes;
         sampleSend();
+        // Bump Stats per-message rather than once-per-batch — otherwise
+        // a batch of 100 reads as a single send in the dashboard, and the
+        // size distribution / per-queue chart lose all resolution.
+        const perMsgKind = mode === "binary" ? "binary" : mode === "none" ? "none" : rawType;
+        onSent(bytes, address.trim(), perMsgKind);
         onLog("ok", `Sent → ${result.address}  |  ${result.message_id}  |  ${result.timestamp}`);
       }
-      // Determine kind for stats: "json"/"xml"/"text" for raw, "binary" for files, "none" otherwise
-      const sendKind = mode === "binary" ? "binary" : mode === "none" ? "none" : rawType;
-      onSent(totalBytes, address.trim(), sendKind);
+      // Bump the per-profile Recent queues MRU so this address shows up
+      // at the top of the picker dropdown next time.
+      recordRecentQueue(activeProfile, address.trim());
       const durationMs = Date.now() - startedAt;
       setLastSend({ ok: true, count: n, bytes: totalBytes, durationMs, ts: new Date().toLocaleTimeString() });
       setProgress(null);
@@ -1013,7 +1024,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
       {/* ─── TITLE ROW ─── */}
       <ViewTopBar
         icon={<Send className="w-3.5 h-3.5" />}
-        title="Send message"
+        title="Send Messages"
       >
         <button
           onClick={doSend}
@@ -1028,7 +1039,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
       {/* ─── QUEUE PICKER ROW ─── */}
       <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
         <SectionLabel className="shrink-0">To</SectionLabel>
-        <QueuePicker value={address} onChange={setAddress} connected={connected} showSave className="flex-1" />
+        <QueuePicker value={address} onChange={setAddress} connected={connected} profileName={activeProfile} showSave className="flex-1" />
       </div>
 
       {/* ─── TABS ─── */}
@@ -1807,6 +1818,7 @@ export default function PublisherView({ connected, defaultAddress, activeProfile
                       value={rrAddress}
                       onChange={setRrAddress}
                       connected={connected}
+                      profileName={activeProfile}
                       disabled={!rrEnabled}
                       placeholder="reply_queue or temp address…"
                     />

@@ -227,6 +227,7 @@ pub struct ManagementChannel {
 }
 
 impl ManagementChannel {
+    #[allow(clippy::too_many_arguments)]
     pub async fn open(
         host: &str,
         port: u16,
@@ -234,11 +235,14 @@ impl ManagementChannel {
         password: &str,
         use_tls: bool,
         tls_skip_verify: bool,
+        client_cert: &crate::amqp::ClientCert,
+        transport: &crate::amqp::TransportOpts,
     ) -> Result<Self, String> {
         let mut connection = crate::amqp::open_connection(
             host, port, username, password,
             use_tls, tls_skip_verify,
             "amqpush-mgmt", false, 0,
+            client_cert, transport,
         )
         .await
         .map_err(|e| format!("Open conn: {e}"))?;
@@ -367,6 +371,42 @@ pub async fn purge_queue_via(channel: &mut ManagementChannel, queue: &str) -> Re
         &format!("queue.{queue}"),
         "removeAllMessages",
         Body::Value(AmqpValue(Value::String("[]".into()))),
+    ).await
+}
+
+/// Selectively delete messages from a queue by their AMQP message-id.
+/// Builds an Artemis JMS-style selector `AMQUserID='id1' OR AMQUserID='id2' …`
+/// and passes it to the queue's `removeMessages(filter)` management op,
+/// which returns the count actually deleted. Empty id list is a no-op.
+///
+/// Requires Artemis (or ActiveMQ Classic with AMQP) — the management
+/// operation isn't standardised across other brokers. Caller surfaces a
+/// clear error when the RPC fails.
+pub async fn remove_messages_by_ids_via(
+    channel: &mut ManagementChannel,
+    queue: &str,
+    message_ids: &[String],
+) -> Result<i64, String> {
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+    // Escape single quotes in IDs (rare but possible — selector strings
+    // double single quotes for literal `'`). Anything else is left as-is.
+    let filter = message_ids.iter()
+        .map(|id| format!("AMQUserID='{}'", id.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    // Management op args are a JSON array string; embed the filter as a
+    // single string element, escaping `"` and `\` per JSON rules.
+    let escaped_filter = filter.replace('\\', "\\\\").replace('"', "\\\"");
+    let args = format!("[\"{escaped_filter}\"]");
+    invoke_management::<i64>(
+        &mut channel.sender,
+        &mut channel.receiver,
+        &channel.reply_to,
+        &format!("queue.{queue}"),
+        "removeMessages",
+        Body::Value(AmqpValue(Value::String(args))),
     ).await
 }
 
@@ -593,6 +633,7 @@ fn parse_artemis_response<T: for<'de> Deserialize<'de>>(
 // (distribution-mode = "copy" on the source) would be cleaner, but `release`
 // works on every broker without configuration.
 
+#[allow(clippy::too_many_arguments)]
 pub async fn peek_messages(
     host: &str,
     port: u16,
@@ -600,6 +641,8 @@ pub async fn peek_messages(
     password: &str,
     use_tls: bool,
     tls_skip_verify: bool,
+    client_cert: &crate::amqp::ClientCert,
+    transport: &crate::amqp::TransportOpts,
     queue: &str,
     max: u32,
     per_message_timeout_ms: u64,
@@ -608,6 +651,7 @@ pub async fn peek_messages(
         host, port, username, password,
         use_tls, tls_skip_verify,
         "amqpush-peek", false, 0,
+        client_cert, transport,
     )
     .await
     .map_err(|e| format!("Open conn: {e}"))?;

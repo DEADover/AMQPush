@@ -9,6 +9,7 @@ mod history_store;
 mod notif_drainer;
 mod profiles;
 mod queues;
+mod recordings;
 mod subscriber;
 mod templates;
 #[cfg(target_os = "macos")]
@@ -19,11 +20,18 @@ use broker::{BrokerConnection, BrokerConsumer, BrokerQueue, ManagementChannel, P
 use notif_drainer::DrainerHandle;
 use profiles::Profile;
 use queues::SavedQueue;
+use recordings::{Recording, RecordingSummary};
 use subscriber::SubscriberHandle;
 use templates::Template;
 
 pub struct AppState {
     client: Arc<Mutex<AmqpClient>>,
+    /// Secondary transient client used by the cross-broker shovel flow.
+    /// Kept in its own slot so the user's primary connection isn't
+    /// disturbed when shovel runs to a different broker. Opened on
+    /// `shovel_open_target`, closed on `shovel_close_target` (or implicitly
+    /// when the modal closes — the FE always pairs the two).
+    shovel_target: Arc<Mutex<Option<AmqpClient>>>,
     /// Active subscriber tasks keyed by queue address. Multiple queues can be
     /// listened to concurrently; messages from all of them go through the
     /// shared `message_received` event tagged with `queue`.
@@ -61,7 +69,30 @@ async fn connect(
     reconnect_base_ms: Option<u64>,
     reconnect_max_ms: Option<u64>,
     reconnect_multiplier: Option<f64>,
+    // mTLS — optional path to a client certificate (PEM or PKCS#12), key
+    // (PEM only), and passphrase (PKCS#12 only). Empty strings treated as
+    // None so older callers / palette flows still work unchanged.
+    client_cert_path: Option<String>,
+    client_key_path: Option<String>,
+    client_key_passphrase: Option<String>,
+    // WebSocket transport — when true, AMQP rides over ws://host:port/<path>
+    // (or wss:// when use_tls is also true). Useful behind corporate firewalls
+    // that block 5671/5672, plus cloud brokers like Azure SB / Amazon MQ /
+    // RabbitMQ with the web-amqp plugin.
+    use_ws: Option<bool>,
+    ws_path: Option<String>,
 ) -> Result<(), String> {
+    let client_cert = amqp::ClientCert {
+        cert_path: client_cert_path.filter(|s| !s.trim().is_empty()),
+        key_path: client_key_path.filter(|s| !s.trim().is_empty()),
+        passphrase: client_key_passphrase.filter(|s| !s.is_empty()),
+    };
+    let transport = amqp::TransportOpts {
+        use_ws: use_ws.unwrap_or(false),
+        ws_path: ws_path.unwrap_or_default(),
+    };
+    let cert_clone = client_cert.clone();
+    let transport_clone = transport.clone();
     {
         let mut client = state.client.lock().await;
         client
@@ -77,6 +108,8 @@ async fn connect(
                 connect_timeout_secs.unwrap_or(10),
                 sasl_anonymous.unwrap_or(false),
                 tls_skip_verify.unwrap_or(false),
+                client_cert,
+                transport,
             )
             .await?;
         client.reconnect_base_ms = reconnect_base_ms.unwrap_or(1_000);
@@ -97,6 +130,7 @@ async fn connect(
         match notif_drainer::start(
             &host, port, &username, &password,
             use_tls, tls_skip_verify.unwrap_or(false),
+            cert_clone, transport_clone,
         ).await {
             Ok(handle) => *notif = Some(handle),
             Err(e) => eprintln!("notif_drainer: not started ({e})"),
@@ -225,14 +259,16 @@ async fn start_subscriber(
     state: tauri::State<'_, AppState>,
     address: String,
     selector: Option<String>,
+    topic_pattern: Option<String>,
 ) -> Result<(), String> {
     let selector = selector.unwrap_or_default();
+    let topic_pattern = topic_pattern.unwrap_or_default();
     let addr = address.trim().to_string();
     if addr.is_empty() {
         return Err("Queue address is required".into());
     }
 
-    let (host, port, username, password, use_tls, tls_skip_verify, base_ms, max_ms, mult) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport, base_ms, max_ms, mult) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected to broker".into());
@@ -244,6 +280,8 @@ async fn start_subscriber(
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
             client.reconnect_base_ms,
             client.reconnect_max_ms,
             client.reconnect_multiplier,
@@ -261,7 +299,7 @@ async fn start_subscriber(
 
     let handle = subscriber::start(
         &host, port, addr.clone(), &username, &password,
-        use_tls, tls_skip_verify, selector,
+        use_tls, tls_skip_verify, client_cert, transport, selector, topic_pattern,
         base_ms, max_ms, mult,
         app,
     ).await?;
@@ -370,6 +408,92 @@ fn rename_template(old_name: String, new_name: String) -> Result<(), String> {
     templates::rename(&old_name, &new_name)
 }
 
+// ── recordings (Receive recording + replay) ──────────────────────────────────
+
+#[tauri::command]
+fn list_recordings() -> Vec<RecordingSummary> {
+    recordings::list_summaries()
+}
+
+#[tauri::command]
+fn get_recording(name: String) -> Result<Recording, String> {
+    recordings::load_one(&name)
+}
+
+#[tauri::command]
+fn save_recording(recording: Recording) -> Result<(), String> {
+    recordings::save_one(&recording)
+}
+
+#[tauri::command]
+fn delete_recording(name: String) -> Result<(), String> {
+    recordings::delete_one(&name)
+}
+
+/// Walk a saved recording and resubmit each message to `target` with
+/// inter-message delays scaled by `speed` (1.0 = real-time, 2.0 = twice as
+/// fast, 0.0 / negative = max speed / no delays). Emits `replay_progress`
+/// events so the UI can render a progress bar / cancel button. Stops cleanly
+/// on cancel via the abort handle stored in `AppState`.
+#[tauri::command]
+async fn play_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+    target: String,
+    speed: f64,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let target = target.trim().to_string();
+    if target.is_empty() {
+        return Err("Target queue is required".into());
+    }
+    if !state.client.lock().await.is_connected() {
+        return Err("Not connected to broker".into());
+    }
+    let rec = recordings::load_one(&name)?;
+    if rec.messages.is_empty() {
+        return Err("Recording has no messages".into());
+    }
+
+    // Compute the inter-message gap (ms) scaled by speed. Treat speed <= 0
+    // as "max speed" — send back-to-back with no delays.
+    let total = rec.messages.len();
+    let mut prev_offset: u64 = 0;
+    for (i, m) in rec.messages.iter().enumerate() {
+        if i > 0 && speed > 0.0 {
+            let gap = m.offset_ms.saturating_sub(prev_offset) as f64 / speed.max(0.01);
+            if gap > 0.5 {
+                tokio::time::sleep(std::time::Duration::from_millis(gap as u64)).await;
+            }
+        }
+        prev_offset = m.offset_ms;
+
+        let mut client = state.client.lock().await;
+        let send_res = client.send_message(
+            &target,
+            Some(m.body.clone()),
+            None,
+            None,
+            m.properties.clone(),
+            None,
+        ).await;
+        drop(client);
+
+        let ok = send_res.is_ok();
+        if let Err(e) = send_res {
+            let _ = app.emit("replay_progress", serde_json::json!({
+                "step": i + 1, "total": total, "ok": false, "error": e.to_string(),
+            }));
+            return Err(format!("Replay aborted at message {}/{}: {e}", i + 1, total));
+        }
+        let _ = app.emit("replay_progress", serde_json::json!({
+            "step": i + 1, "total": total, "ok": ok,
+        }));
+    }
+    Ok(())
+}
+
 /// Try to attach a sender link to `address`. On brokers with auto-create-queues
 /// (ActiveMQ Classic/Artemis default config) this creates the queue if absent.
 /// Returns Ok(()) if the address is reachable, Err if the broker refuses it.
@@ -382,11 +506,96 @@ async fn verify_queue(
     client.verify_queue(&address).await
 }
 
+// ── shovel (cross-broker copy / move) ────────────────────────────────────────
+
+/// Build an `AmqpClient::connect`-friendly bundle from a saved `Profile`.
+/// Used by the shovel target-open command to translate the JSON profile
+/// shape into our internal types (TLS / cert / transport / SASL flags).
+fn profile_to_connect_params(p: &Profile) -> (amqp::ClientCert, amqp::TransportOpts) {
+    let cert = amqp::ClientCert {
+        cert_path: if p.client_cert_path.trim().is_empty() { None } else { Some(p.client_cert_path.clone()) },
+        key_path:  if p.client_key_path.trim().is_empty()  { None } else { Some(p.client_key_path.clone()) },
+        passphrase: if p.client_key_passphrase.is_empty()  { None } else { Some(p.client_key_passphrase.clone()) },
+    };
+    let transport = amqp::TransportOpts {
+        use_ws: p.use_ws,
+        ws_path: p.ws_path.clone(),
+    };
+    (cert, transport)
+}
+
+/// Open a transient AMQP client connection to the shovel target profile.
+/// Held in `AppState::shovel_target` separately from the user's primary
+/// connection so the active session isn't disturbed. The FE always pairs
+/// this with `shovel_close_target` when the shovel modal closes.
+#[tauri::command]
+async fn shovel_open_target(
+    state: tauri::State<'_, AppState>,
+    profile: Profile,
+) -> Result<(), String> {
+    let (cert, transport) = profile_to_connect_params(&profile);
+    let mut client = AmqpClient::new();
+    client
+        .connect(
+            &profile.host,
+            profile.port,
+            "",                              // no default address; senders attach lazily
+            &profile.username,
+            &profile.password,
+            profile.use_tls,
+            profile.container_id.as_str(),
+            profile.heartbeat_secs,
+            profile.connect_timeout_secs,
+            profile.sasl_anonymous,
+            profile.tls_skip_verify,
+            cert,
+            transport,
+        )
+        .await
+        .map_err(|e| format!("Shovel target connect: {e}"))?;
+    let mut slot = state.shovel_target.lock().await;
+    if let Some(mut old) = slot.take() {
+        // Replacing an existing target — close the old one to avoid stranded
+        // connections on the previous broker.
+        old.disconnect().await.ok();
+    }
+    *slot = Some(client);
+    Ok(())
+}
+
+/// Send one message through the shovel target connection. Used in the
+/// frontend's peek→transform→send loop. Errors out with a clear message
+/// if the target hasn't been opened, so the caller can re-open and retry.
+#[tauri::command]
+async fn shovel_send_to_target(
+    state: tauri::State<'_, AppState>,
+    target: String,
+    body: String,
+    custom_props: HashMap<String, String>,
+) -> Result<SendResult, String> {
+    let mut slot = state.shovel_target.lock().await;
+    let client = slot.as_mut()
+        .ok_or("Shovel target is not open — call shovel_open_target first")?;
+    client.send_message(&target, Some(body), None, None, custom_props, None).await
+}
+
+/// Tear down the transient shovel target connection. Idempotent — calling
+/// when nothing is open is a no-op so the FE can fire-and-forget on modal
+/// close.
+#[tauri::command]
+async fn shovel_close_target(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut slot = state.shovel_target.lock().await;
+    if let Some(mut client) = slot.take() {
+        client.disconnect().await.ok();
+    }
+    Ok(())
+}
+
 // ── broker management (Artemis / ActiveMQ Classic with AMQP) ────────────────
 
 #[tauri::command]
 async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<BrokerQueue>, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -398,6 +607,8 @@ async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<Bro
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
@@ -405,7 +616,7 @@ async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<Bro
 
     // Lazily open the management channel on first use
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
 
@@ -429,7 +640,7 @@ async fn list_broker_queues(state: tauri::State<'_, AppState>) -> Result<Vec<Bro
 /// list so a healthy refresh / ping costs the broker effectively nothing.
 #[tauri::command]
 async fn ping_broker(state: tauri::State<'_, AppState>) -> Result<u64, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -441,12 +652,14 @@ async fn ping_broker(state: tauri::State<'_, AppState>) -> Result<u64, String> {
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
     let mut mgmt_guard = state.mgmt.lock().await;
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
     let chan = mgmt_guard.as_mut().expect("just opened");
@@ -466,7 +679,7 @@ async fn ping_broker(state: tauri::State<'_, AppState>) -> Result<u64, String> {
 /// channel; on RPC failure we drop it so the next call reopens.
 #[tauri::command]
 async fn list_broker_connections(state: tauri::State<'_, AppState>) -> Result<Vec<BrokerConnection>, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -478,12 +691,14 @@ async fn list_broker_connections(state: tauri::State<'_, AppState>) -> Result<Ve
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
     let mut mgmt_guard = state.mgmt.lock().await;
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
     let chan = mgmt_guard.as_mut().expect("just opened");
@@ -503,7 +718,7 @@ async fn list_broker_connections(state: tauri::State<'_, AppState>) -> Result<Ve
 /// drill-down in the Browser. Reuses the management channel.
 #[tauri::command]
 async fn list_broker_consumers(state: tauri::State<'_, AppState>) -> Result<Vec<BrokerConsumer>, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -515,12 +730,14 @@ async fn list_broker_consumers(state: tauri::State<'_, AppState>) -> Result<Vec<
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
     let mut mgmt_guard = state.mgmt.lock().await;
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
     let chan = mgmt_guard.as_mut().expect("just opened");
@@ -541,7 +758,7 @@ async fn list_broker_consumers(state: tauri::State<'_, AppState>) -> Result<Vec<
 /// the usual culprit across Artemis versions).
 #[tauri::command]
 async fn fetch_broker_connections_raw(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -553,12 +770,14 @@ async fn fetch_broker_connections_raw(state: tauri::State<'_, AppState>) -> Resu
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
     let mut mgmt_guard = state.mgmt.lock().await;
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
     let chan = mgmt_guard.as_mut().expect("just opened");
@@ -577,7 +796,7 @@ async fn fetch_broker_connections_raw(state: tauri::State<'_, AppState>) -> Resu
 /// fetch above.
 #[tauri::command]
 async fn fetch_broker_consumers_raw(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -589,12 +808,14 @@ async fn fetch_broker_consumers_raw(state: tauri::State<'_, AppState>) -> Result
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
     let mut mgmt_guard = state.mgmt.lock().await;
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
     let chan = mgmt_guard.as_mut().expect("just opened");
@@ -615,7 +836,7 @@ async fn fetch_broker_consumers_raw(state: tauri::State<'_, AppState>) -> Result
 /// spam SESSION_CLOSED notifications on every purge.
 #[tauri::command]
 async fn purge_queue(state: tauri::State<'_, AppState>, queue: String) -> Result<i64, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -627,16 +848,61 @@ async fn purge_queue(state: tauri::State<'_, AppState>, queue: String) -> Result
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
 
     let mut mgmt_guard = state.mgmt.lock().await;
     if mgmt_guard.is_none() {
-        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify).await?;
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
         *mgmt_guard = Some(chan);
     }
     let chan = mgmt_guard.as_mut().expect("just opened");
     match broker::purge_queue_via(chan, &queue).await {
+        Ok(removed) => Ok(removed),
+        Err(e) => {
+            if let Some(c) = mgmt_guard.take() {
+                c.close().await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Selectively delete N messages from a queue by their AMQP message-id.
+/// Requires Artemis or ActiveMQ Classic with AMQP — uses the same
+/// management RPC as `purge_queue`. Returns the count actually removed.
+#[tauri::command]
+async fn remove_messages_by_ids(
+    state: tauri::State<'_, AppState>,
+    queue: String,
+    message_ids: Vec<String>,
+) -> Result<i64, String> {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
+        let client = state.client.lock().await;
+        if !client.is_connected() {
+            return Err("Not connected".into());
+        }
+        (
+            client.host.clone(),
+            client.port,
+            client.username.clone(),
+            client.password.clone(),
+            client.use_tls,
+            client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
+        )
+    };
+
+    let mut mgmt_guard = state.mgmt.lock().await;
+    if mgmt_guard.is_none() {
+        let chan = ManagementChannel::open(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport).await?;
+        *mgmt_guard = Some(chan);
+    }
+    let chan = mgmt_guard.as_mut().expect("just opened");
+    match broker::remove_messages_by_ids_via(chan, &queue, &message_ids).await {
         Ok(removed) => Ok(removed),
         Err(e) => {
             if let Some(c) = mgmt_guard.take() {
@@ -654,7 +920,7 @@ async fn peek_messages(
     max: u32,
     timeout_ms: u64,
 ) -> Result<Vec<PeekedMessage>, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
@@ -666,9 +932,11 @@ async fn peek_messages(
             client.password.clone(),
             client.use_tls,
             client.tls_skip_verify,
+            client.client_cert.clone(),
+            client.transport.clone(),
         )
     };
-    broker::peek_messages(&host, port, &username, &password, use_tls, tls_skip_verify, &queue, max, timeout_ms)
+    broker::peek_messages(&host, port, &username, &password, use_tls, tls_skip_verify, &client_cert, &transport, &queue, max, timeout_ms)
         .await
 }
 
@@ -680,18 +948,19 @@ async fn await_reply(
     address: String,
     timeout_ms: u64,
 ) -> Result<Option<String>, String> {
-    let (host, port, username, password, use_tls, tls_skip_verify) = {
+    let (host, port, username, password, use_tls, tls_skip_verify, client_cert, transport) = {
         let client = state.client.lock().await;
         if !client.is_connected() {
             return Err("Not connected".into());
         }
-        (client.host.clone(), client.port, client.username.clone(), client.password.clone(), client.use_tls, client.tls_skip_verify)
+        (client.host.clone(), client.port, client.username.clone(), client.password.clone(), client.use_tls, client.tls_skip_verify, client.client_cert.clone(), client.transport.clone())
     };
 
     let mut connection = amqp::open_connection(
         &host, port, &username, &password,
         use_tls, tls_skip_verify,
         "amqpush-reply", false, 0,
+        &client_cert, &transport,
     )
     .await
     .map_err(|e| format!("Reply conn failed: {e}"))?;
@@ -855,6 +1124,7 @@ fn install_macos_menu(app: &tauri::App) -> tauri::Result<()> {
 pub fn run() {
     let state = AppState {
         client: Arc::new(Mutex::new(AmqpClient::new())),
+        shovel_target: Arc::new(Mutex::new(None)),
         subs: Arc::new(Mutex::new(HashMap::new())),
         history: Arc::new(Mutex::new(history_store::load())),
         mgmt: Arc::new(Mutex::new(None)),
@@ -864,6 +1134,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // macOS: set the Dock / About-dialog icon at runtime so dev
             // mode (raw binary, no .app bundle) shows the AMQPush logo
@@ -899,11 +1170,20 @@ pub fn run() {
             save_template,
             delete_template,
             rename_template,
+            list_recordings,
+            get_recording,
+            save_recording,
+            delete_recording,
+            play_recording,
+            shovel_open_target,
+            shovel_send_to_target,
+            shovel_close_target,
             export_history,
             await_reply,
             list_broker_queues,
             peek_messages,
             purge_queue,
+            remove_messages_by_ids,
             ping_broker,
             list_broker_connections,
             list_broker_consumers,

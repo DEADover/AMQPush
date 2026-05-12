@@ -3,7 +3,7 @@ import {
   X, Search, BookOpen, Plug, Send, Inbox, ListTree, History as HistoryIcon,
   BarChart3, Terminal, Keyboard, Sparkles, ShieldCheck, Braces, Code2,
   Repeat2, CornerDownLeft, BookMarked, Database, FileSpreadsheet, Filter,
-  AlertTriangle, Lightbulb, ChevronRight, Network,
+  AlertTriangle, Lightbulb, ChevronRight, Network, Hash,
 } from "lucide-react";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -104,8 +104,11 @@ const SECTIONS: HelpSection[] = [
         <H3>The 60-second tour</H3>
         <UL>
           <Li>Open <b>Connection</b> (sidebar) → fill host / port / credentials → <b>Save profile</b> → <b>Connect</b>.</Li>
-          <Li>Switch to <b>Send</b>, type a queue name (autocompletes from broker), put text in the Body, hit <b>Send</b> or <Kbd>⌘</Kbd><Kbd>Enter</Kbd>.</Li>
-          <Li><b>Receive</b> shows live messages. <b>Browser</b> peeks at queue contents without consuming. <b>History</b> keeps the last 200 sends with full payload for resend.</Li>
+          <Li>Switch to <b>Send Messages</b>, type a queue name (autocompletes from broker), put text in the Body, hit <b>Send</b> or <Kbd>⌘</Kbd><Kbd>Enter</Kbd>.</Li>
+          <Li><b>Receive Messages</b> shows live messages; <b>REC</b> captures them to a recording, <b>Replay…</b> plays one back to any queue.</Li>
+          <Li><b>Browser</b> peeks at queue contents without consuming — checkboxes enable selective <b>Purge</b>, <b>Shovel</b> (cross-broker copy) and DLQ <b>Edit &amp; Requeue</b>.</Li>
+          <Li><b>Broker Clients</b> (⌘5) shows every client connected to the broker and what each one is consuming.</Li>
+          <Li><b>History</b> keeps the last 200 sends with full payload for resend.</Li>
         </UL>
         <Note>
           Press <Kbd>⌘</Kbd><Kbd>K</Kbd> anywhere to open the command palette — every action,
@@ -126,32 +129,77 @@ const SECTIONS: HelpSection[] = [
     id: "connection",
     title: "Connection",
     icon: <Plug className="w-3.5 h-3.5" />,
-    searchText: "connection profile host port username password tls ssl heartbeat container id sasl anonymous certificate verify advanced workspace group dev staging prod",
+    searchText: "connection profile host port username password tls ssl amqps heartbeat container id sasl anonymous certificate skip verify advanced workspace group dev staging prod default queue reconnect backoff multiplier latency activity log save duplicate delete profile mtls client certificate pem pkcs12 p12 pfx websocket ws wss firewall transport",
     content: (
       <>
         <H><Plug className="w-4 h-4 text-blue-500" />Connection &amp; profiles</H>
         <P>
-          A <b>profile</b> is a saved set of broker credentials and options. The dropdown at the top
-          of the header switches the active profile globally; the same profile is what's auto-loaded
-          on next launch.
+          A <b>profile</b> is a saved set of broker credentials and options. The dropdown at the
+          top of the header switches the active profile globally; the same profile is auto-loaded
+          on next launch. The form is split into a <b>General</b> tab (the things you change
+          often) and an <b>Advanced</b> tab (the things you set once per broker).
         </P>
-        <H3>General fields</H3>
-        <Row label="Name">Display name for the profile (used in the dropdown / palette).</Row>
-        <Row label="Host">Broker hostname or IP. <Code>localhost</Code> for local Artemis.</Row>
+
+        <H3>Profile picker row</H3>
+        <P>
+          The dropdown at the top of the form shows every saved profile, plus the active host /
+          port preview next to its name. Action buttons next to it:
+        </P>
+        <UL>
+          <Li><b>Save</b> — overwrite the currently-selected profile with the form values. Lit when the form differs from what's on disk.</Li>
+          <Li><b>Save as…</b> — save the current values under a new name (prompts for the name inline).</Li>
+          <Li><b>Duplicate</b> (📋 icon) — copy the selected profile under a "<i>name</i> (copy)" name; handy starting point for a sibling environment.</Li>
+          <Li><b>Delete</b> (🗑 icon) — confirms inline before removing the profile from disk.</Li>
+        </UL>
+
+        <H3>General tab</H3>
+        <P>The settings you'll touch most often.</P>
+        <Row label="Host">Broker hostname or IP. <Code>localhost</Code> for local Artemis, <Code>amqps://broker.example.com</Code>-style hosts for cloud brokers.</Row>
         <Row label="Port">Default <Code>5672</Code> (plain), <Code>5671</Code> (TLS).</Row>
-        <Row label="Username / Password">SASL PLAIN credentials. Leave blank with <i>Anonymous</i> on.</Row>
-        <Row label="Default queue">Optional. Pre-fills the destination on the Send view.</Row>
-        <Row label="Use TLS">Negotiates AMQPS. Pair with <i>Skip cert verify</i> for self-signed dev brokers.</Row>
-        <Row label="Workspace">Free-form group label (e.g. <Code>Dev</Code> / <Code>Staging</Code> / <Code>Prod</Code>). Drives sectioned headers in the global profile picker and Cmd+K palette categories. Empty / missing falls back to <Code>Default</Code>. The input has datalist autocomplete from existing workspaces.</Row>
-        <H3>Advanced</H3>
-        <Row label="Container ID">AMQP container identifier — defaults to a random UUID. Set this when the broker authorizes by container.</Row>
-        <Row label="Heartbeat">Idle-timeout for keep-alive frames, seconds. <Code>0</Code> disables.</Row>
-        <Row label="Connect timeout">How long to wait before giving up on connect (seconds).</Row>
-        <Row label="SASL Anonymous">Authenticates without credentials when the broker allows it.</Row>
-        <Row label="Skip cert verify">Disables TLS chain verification — dev only.</Row>
+        <Row label="Workspace">Free-form group label (e.g. <Code>Dev</Code> / <Code>Staging</Code> / <Code>Prod</Code>, or per-service). Drives sectioned headers in the global profile picker and Cmd+K palette categories. Empty / missing falls back to <Code>Default</Code>. The combobox suggests existing workspaces and shows the profile count next to each one — hover a row to reveal a 🗑 icon that <b>deletes the workspace</b> (moves all its profiles back to <Code>Default</Code> with an inline confirm). <Code>Default</Code> itself can't be deleted.</Row>
+        <Row label="Username / Password">SASL PLAIN credentials. Leave blank with <i>Force SASL ANONYMOUS</i> on.</Row>
+        <Row label="TLS / AMQPS">Toggle to negotiate AMQPS on the wire. When on, a sub-option <b>Skip certificate verification</b> appears for self-signed / test brokers — leave off in production.</Row>
+        <Row label="Force SASL ANONYMOUS">Bypass username/password entirely; the broker must allow anonymous logins.</Row>
+        <Row label="AMQP over WebSocket">Tunnel AMQP through <Code>ws://</Code> (or <Code>wss://</Code> when TLS is also on) instead of raw TCP. Picks up brokers that publish AMQP over the WebSocket binding (Tanzu RabbitMQ with the <Code>rabbitmq_web_amqp</Code> plugin, Azure Service Bus, Amazon MQ RabbitMQ flavour, Solace's WS endpoint), and gets you through corporate firewalls that block 5671/5672. Optional <b>WS path</b> sub-field sets the URL path; empty = root.</Row>
+
+        <H3>Advanced tab</H3>
+        <P>One-time-per-broker tuning. The General tab covers the day-to-day; come here when something specific needs changing.</P>
+        <Row label="Default Queue / Address">Optional. Pre-fills the destination on the Send view when this profile is active. Independent from the per-profile <b>Recent</b> queues MRU shown in the queue picker dropdown.</Row>
+        <Row label="Container ID">AMQP container identifier — defaults to <Code>amqpush-&lt;uuid&gt;</Code>. Set this only when the broker authorises connections by container name.</Row>
+        <Row label="Heartbeat">Idle-timeout for keep-alive frames, seconds. <Code>0</Code> disables. Useful when a firewall / NAT closes idle TCP connections — most brokers default to 30s.</Row>
+        <Row label="Connect timeout">Abort the initial connection attempt after N seconds. <Code>0</Code> disables.</Row>
+        <Row label="Subscriber reconnect backoff">Three knobs that control how the subscriber retries after a disconnect: <b>Initial delay</b> (ms), <b>Maximum delay</b> (ms), <b>Multiplier</b>. Defaults are 1000 / 30000 / 2.0 — start at 1 s, double each attempt, cap at 30 s. Bump the initial delay down for fast-iteration dev work; bump the cap up to spare broker logs during long outages.</Row>
+        <Row label="mTLS client certificate">
+          Opt-in mutual TLS — the broker authenticates the client by certificate. Supply a path
+          to either a PEM <Code>.crt</Code> + a separate unencrypted PKCS#8 <Code>.key</Code>,
+          or a PKCS#12 <Code>.p12</Code>/<Code>.pfx</Code> bundle with a passphrase. Each file
+          field has a <b>Browse</b> button that opens the native file picker (Finder / Explorer)
+          with cert / key extension filters. PEM keys must be unencrypted — convert with{" "}
+          <Code>openssl pkcs8 -topk8 -nocrypt</Code>, or use a PKCS#12 bundle if your key is
+          encrypted. The whole card is disabled with an amber warning until you enable{" "}
+          <b>TLS / AMQPS</b> in General → Security, since the certificate has no transport to
+          attach to without server TLS. <b>Not yet supported on the WebSocket transport</b> —
+          connect will error out if you enable both.
+        </Row>
+
+        <H3>Header indicators (after Connect)</H3>
+        <UL>
+          <Li><b>Green "Connected" dot + latency chip</b> — RTT to the broker, measured every 5 s via a trivial management ping. Goes amber at &gt; 100 ms, red at &gt; 500 ms. Surfaces degrading network / broker conditions <i>before</i> a send or subscribe stalls.</Li>
+          <Li><b>Active profile name + host:port</b> — clickable, opens the same profile-switch menu as Cmd+K.</Li>
+        </UL>
+
+        <H3>Activity panel</H3>
+        <P>
+          The collapsible panel at the bottom of the view filters the global log down to
+          connection / subscriber / broker events. It stays mounted, so switching views and
+          coming back keeps the trace. Click the header to fold / unfold; the rest of the
+          stream still lives in <b>Logs</b> (⌘8).
+        </P>
+
         <Note>
-          The Activity panel under the form is a per-connection log. It stays mounted, so switching
-          views and coming back keeps the trace.
+          Profiles are stored at <Code>~/.amqpush/profiles.json</Code> with a versioned schema —
+          adding new optional fields in future releases will not break older files, and we have
+          migration hooks for breaking shape changes.
         </Note>
       </>
     ),
@@ -169,6 +217,14 @@ const SECTIONS: HelpSection[] = [
         <P>
           The Send view is organized as tabs. Body and Properties are the essentials; everything
           else (Variables, Pre-script, Batch, CSV, Reply, Templates) is opt-in.
+        </P>
+        <H3>Queue picker</H3>
+        <P>
+          The destination field at the top of Send (and the equivalent on Receive) drops down a
+          combined list. The <b>Recent</b> section is the 10 most recently used queues for the
+          current profile — anything you've successfully sent to or subscribed from. Hover a
+          recent row to reveal a small × that forgets that entry; the rest fills up automatically.
+          Below it is the <b>broker queues</b> table, refreshed when you open the dropdown.
         </P>
         <H3>Body</H3>
         <UL>
@@ -647,7 +703,7 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
     id: "receive",
     title: "Receive",
     icon: <Inbox className="w-3.5 h-3.5" />,
-    searchText: "receive subscriber subscribe live messages filter consume credit reconnect drainer notifications dla selector jms broker filter expression where priority",
+    searchText: "receive subscriber subscribe live messages filter consume credit reconnect drainer notifications dla selector jms broker filter expression where priority topic pattern wildcard multicast solace artemis hierarchy hash dot star record recording replay capture save buffer speed multiplier playback timing",
     content: (
       <>
         <H><Inbox className="w-4 h-4 text-blue-500" />Receive (subscriber)</H>
@@ -663,6 +719,12 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
           <Li><b>Filter</b> restricts the visible list to rows matching a substring (case-insensitive across body + properties).</Li>
           <Li><b>Reply</b> on a message pre-fills Send with the original's <Code>correlation-id</Code>.</Li>
         </UL>
+        <P>
+          The message list has a sticky <b>Message ID / Date-Time</b> header at the top and is
+          sorted <b>newest-first</b> — fresh messages appear above older ones. The timestamp
+          column shows full local <Code>YYYY-MM-DD HH:MM:SS</Code> so it lines up with the
+          Browser peek timestamps for cross-view correlation.
+        </P>
         <H3>Broker-side selectors (filter on the wire)</H3>
         <P>
           Click the <Filter className="w-3 h-3 inline-block align-middle" /> <b>Selector</b>{" "}
@@ -685,6 +747,57 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
           application properties. They cannot match on body content. Empty selector = no filter
           (broker delivers everything, same as before).
         </Note>
+
+        <H3>Topic-pattern subscribe (wildcards)</H3>
+        <P>
+          Click the <b>#</b> <b>Pattern</b> button next to Selector to expand a second filter
+          input. Enter a wildcard pattern matching the broker's topic / multicast address syntax
+          and only messages whose routing key matches will be delivered.
+        </P>
+        <UL>
+          <Li><b>Artemis</b> (multicast addresses): <Code>orders.*</Code> matches one word, <Code>orders.#</Code> matches zero or more words.</Li>
+          <Li><b>Solace</b>: <Code>orders/*</Code> matches one level, <Code>orders/&gt;</Code> matches one or more levels.</Li>
+          <Li><b>Qpid Broker-J / ActiveMQ Classic</b>: <Code>orders.*</Code> / <Code>orders.#</Code>.</Li>
+        </UL>
+        <P>
+          The pattern is attached as the AMQP 1.0 source filter under descriptor{" "}
+          <Code>apache.org:legacy-amqp-topic-binding:string</Code>. Active subscriptions with a
+          pattern show a small <Hash className="w-3 h-3 inline-block align-middle text-violet-500" /> badge.
+          <b>Pattern</b> and <b>Selector</b> stack — set both and both filters apply.
+        </P>
+        <Note>
+          Some brokers (notably Artemis multicast) honour wildcards directly in the source
+          address — you can also just type <Code>orders.*</Code> in the queue field. The
+          dedicated Pattern filter is the portable option that works with Solace topic
+          hierarchies, Qpid, and any broker that recognises the legacy AMQP topic-binding
+          descriptor.
+        </Note>
+
+        <H3>Recording & Replay</H3>
+        <P>
+          The <b>REC</b> button on the active-subscription bar starts capturing incoming messages
+          into an in-memory buffer along with their arrival timestamps. Click again to pause; the
+          buffer is preserved so you can review the count first. Press <b>Save…</b> to flush the
+          buffer to{" "}
+          <Code>~/.amqpush/recordings/&lt;name&gt;.json</Code> — a JSON file with the message
+          bodies, content-types, application properties, and inter-message timings (relative
+          offsets in ms).
+        </P>
+        <P>
+          The <b>Replay…</b> button in the top bar opens a modal that lists every saved recording.
+          Pick one, choose a target queue (defaults to the recording's original source), pick a
+          speed multiplier ({" "}<Code>0.5×</Code> / <Code>1×</Code> / <Code>2×</Code> / <Code>5×</Code>{" "}
+          / <Code>max</Code> = no delays), and click <b>Play</b>. The backend walks the file and
+          re-sends each message with delays scaled by the speed. Progress streams back via a live
+          bar; the recording itself is left untouched.
+        </P>
+        <Note>
+          Replay uses the normal <Code>send_message</Code> pipeline — the auto-set AMQP properties
+          (<Code>message-id</Code>, <Code>creation-time</Code>) are fresh on each replay, so
+          consumers can deduplicate using the original message-id from{" "}
+          <Code>application_properties</Code> if your contract requires it.
+        </Note>
+
         <Note>
           On Artemis with <Code>send-to-dla-on-no-route</Code> enabled, AMQPush silently drains the
           internal <Code>activemq.notifications</Code> address so unrouted notifications don't pile
@@ -699,7 +812,7 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
     id: "browser",
     title: "Browser",
     icon: <ListTree className="w-3.5 h-3.5" />,
-    searchText: "browser queue browser peek messages purge delete management rpc artemis remove all messages refresh dlq dead letter requeue redeliver original destination who holds message consumer credit unacked",
+    searchText: "browser queue browser peek messages purge delete management rpc artemis remove all messages refresh dlq dead letter requeue redeliver original destination who holds message consumer credit unacked edit body repair bulk select inline modal walkthrough resubmit target shovel cross broker copy promote prod dev transform js select all max checkbox selective amquserid filter",
     content: (
       <>
         <H><ListTree className="w-4 h-4 text-blue-500" />Queue browser</H>
@@ -711,8 +824,30 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
         <H3>Peek</H3>
         <P>
           Reads a snapshot of pending messages — safe, non-destructive. Each entry shows the same
-          metadata view as Receive. Use this to debug stuck or dead-letter queues.
+          metadata view as Receive. Use this to debug stuck or dead-letter queues. The
+          <b> Max</b> dropdown picks how many to fetch: presets up to 5000 plus an{" "}
+          <b>All</b> option that resolves to the queue's broker-reported{" "}
+          <Code>message_count</Code> (capped at 50 000 for safety). Changing the cap{" "}
+          <b>re-peeks immediately</b> — no need to follow up with a manual Refresh. Rows are
+          sorted by AMQP <Code>creation-time</Code> with newest at the top; the{" "}
+          <Code>#N</Code> column shows the original broker-delivery order. The timestamp
+          column uses full local <Code>YYYY-MM-DD HH:MM:SS</Code>.
         </P>
+
+        <H3>Multi-select actions</H3>
+        <P>
+          Each peeked row has a checkbox on its left. Selecting one or more rows reveals an action
+          bar with:
+        </P>
+        <UL>
+          <Li><b>Shovel selected…</b> — open the cross-broker shovel modal pre-populated with the picked subset (instead of the full snapshot).</Li>
+          <Li><b>Purge selected</b> — delete only the picked messages via Artemis's{" "}
+            <Code>queue.removeMessages</Code> with a JMS selector matching their{" "}
+            <Code>AMQUserID</Code>s. Requires every selected message to have a non-empty{" "}
+            <Code>message-id</Code> (the button is disabled with a tooltip otherwise).
+          </Li>
+          <Li>On DLQ queues only: <b>Edit & Requeue…</b> and <b>Requeue selected</b> are also available.</Li>
+        </UL>
         <H3>Purge</H3>
         <P>
           The red <b>Purge</b> button on the peek pane removes <i>all</i> messages from the queue
@@ -752,6 +887,32 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
           You can also requeue messages individually: expanding any DLQ message reveals a{" "}
           <b>{"Requeue → <origin>"}</b> chip at the top of its details pane.
         </P>
+
+        <H3>Edit &amp; Requeue (per-message or bulk)</H3>
+        <P>
+          When a message landed in the DLQ because of a fixable payload bug — bad JSON,
+          a stale field, a wrong content-type — you can edit it before resubmitting. Each
+          peeked DLQ message has an <b>Edit &amp; Requeue…</b> chip in its details pane.
+          Clicking opens a modal with:
+        </P>
+        <UL>
+          <Li><b>Body editor</b> (CodeMirror with JSON / XML highlighting) pre-filled with the original payload — tweak whatever you need.</Li>
+          <Li><b>Target field</b> defaulted to the message's original destination; you can override to any other queue (handy for promoting a fixed payload to a different environment or replaying through a sanitiser queue).</Li>
+        </UL>
+        <P>
+          For bulk repair, every peeked message on a DLQ queue now has a checkbox on its
+          left. Pick several, and a selection bar appears with two actions: <b>Edit &amp;
+          Requeue…</b> walks through them one at a time (Resubmit & next / Skip / back-forward
+          navigation between them), and <b>Requeue selected</b> resubmits the lot without
+          editing.
+        </P>
+        <Note>
+          The non-internal application properties (everything outside the{" "}
+          <Code>_AMQ_*</Code> markers) are carried over automatically — you don't have
+          to re-build them. Only the body and target are editable. Source messages stay
+          on the DLQ either way; use <b>Purge</b> afterwards to drop the originals.
+        </Note>
+
         <Note>
           Requeue does <i>not</i> delete the original from the DLQ — peek-and-republish leaves
           the source untouched. After a successful Requeue all, follow up with the Purge button
@@ -778,12 +939,12 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
   /* ── Inspector ───────────────────────────────────────────────────────── */
   {
     id: "inspector",
-    title: "Clients",
+    title: "Broker Clients",
     icon: <Network className="w-3.5 h-3.5" />,
-    searchText: "inspector clients connections consumers who holds message credit unacked broker management listConnectionsAsJSON listAllConsumersAsJSON session protocol",
+    searchText: "inspector clients broker connections consumers who holds message credit unacked broker management listConnectionsAsJSON listAllConsumersAsJSON session protocol",
     content: (
       <>
-        <H><Network className="w-4 h-4 text-blue-500" />Clients inspector</H>
+        <H><Network className="w-4 h-4 text-blue-500" />Broker Clients inspector</H>
         <P>
           Shows everyone connected to the broker right now — both AMQPush itself and any
           other clients (other AMQP libraries, Core / OpenWire / STOMP, the broker's own
@@ -907,7 +1068,7 @@ ctx.set("amount_cents", String(Math.round(usd * 100)));`}</pre>
         <H><Keyboard className="w-4 h-4 text-blue-500" />Keyboard shortcuts</H>
         <H3>Global</H3>
         <Row label={<><Kbd>⌘</Kbd><Kbd>K</Kbd></>}>Open command palette.</Row>
-        <Row label={<><Kbd>⌘</Kbd><Kbd>1</Kbd>…<Kbd>7</Kbd></>}>Switch view (Connection / Send / Receive / Browser / History / Stats / Logs).</Row>
+        <Row label={<><Kbd>⌘</Kbd><Kbd>1</Kbd>…<Kbd>8</Kbd></>}>Switch view (Connection / Send / Receive / Browser / Broker Clients / History / Stats / Logs).</Row>
         <Row label={<><Kbd>⌘</Kbd><Kbd>L</Kbd></>}>Open Logs.</Row>
         <Row label={<><Kbd>⌘</Kbd><Kbd>Enter</Kbd></>}>Send the current message (Send view).</Row>
         <Row label={<><Kbd>Esc</Kbd></>}>Close any open modal / palette.</Row>
@@ -1048,7 +1209,12 @@ export default function HelpModal({
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[920px] max-w-[95vw] h-[78vh] flex flex-col overflow-hidden"
+        // `select-text` opts the whole Help modal out of the global
+        // `body { user-select: none; }` rule — every paragraph, list item,
+        // code span, and table row inside Help becomes selectable so users
+        // can copy snippets (paths, token names, broker URLs, etc.) directly
+        // out of the docs.
+        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[920px] max-w-[95vw] h-[78vh] flex flex-col overflow-hidden select-text"
       >
         {/* Header */}
         <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-t-line bg-t-panel">

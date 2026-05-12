@@ -5,7 +5,7 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import {
   Play, Square, Trash2, Inbox, Search, X, Loader2, Pause, CornerUpLeft,
   Tag, MessageSquare, Download, Palette, Plus, Edit3,
-  Database, GitCompare, ChevronDown, Filter,
+  Database, GitCompare, ChevronDown, Filter, Hash, Circle, Save,
 } from "lucide-react";
 import CopyButton from "../CopyButton";
 import { ReceivedMessage, SubEvent } from "../../types";
@@ -17,6 +17,7 @@ import SectionLabel from "../SectionLabel";
 import ViewTopBar from "../ViewTopBar";
 import ConfirmDialog from "../ConfirmDialog";
 import { fmtBytes, fmtDuration, csvEscape } from "../../utils/format";
+import { recordRecentQueue } from "../../utils/recentQueues";
 import { tryPrettyJson, tryPrettyXml, hexDump, detectFormat } from "../../utils/bodyView";
 import { diffLines } from "../../utils/diff";
 
@@ -30,10 +31,29 @@ interface ReplyArg {
 interface Props {
   connected: boolean;
   defaultAddress: string;
+  /** Active profile name — used to scope the per-profile Recent queues MRU. */
+  activeProfile?: string;
   pendingAddress?: { address: string; nonce: number } | null;
   onLog: (kind: "info" | "ok" | "err", text: string) => void;
   onMessageReceived?: (bytes: number, queue: string) => void;
   onReply?: (arg: ReplyArg) => void;
+}
+
+/**
+ * Display a subscriber timestamp as `YYYY-MM-DD HH:MM:SS`. The Rust backend
+ * has formatted the field this way since the date-time switch; older
+ * persisted messages still in localStorage carry the legacy `HH:MM:SS`
+ * form, which we promote to today's date so the column doesn't render
+ * inconsistently mid-session.
+ */
+function fmtTimestamp(ts: string): string {
+  if (!ts) return "";
+  // New-format value already has a date — leave alone.
+  if (ts.includes("-")) return ts;
+  // Legacy `HH:MM:SS` — synthesise today's date prefix.
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${ts}`;
 }
 
 // ── highlight rules ──────────────────────────────────────────────────────────
@@ -122,6 +142,9 @@ interface QueueState {
   /** JMS selector this subscription was started with (if any). Drives a
    *  small filter-chip on the active-subscription pill. */
   selector?: string;
+  /** Topic-pattern wildcard this subscription was started with (if any).
+   *  Sent as `apache.org:legacy-amqp-topic-binding:string` source filter. */
+  topicPattern?: string;
   /** Set when the subscriber backend hit a permanent failure (auth refused,
    *  address not found, etc.) — retry would just loop. Chip turns red, the
    *  X stays visible for user dismissal. */
@@ -130,7 +153,7 @@ interface QueueState {
 
 // ── component ────────────────────────────────────────────────────────────────
 
-export default function SubscriberView({ connected, defaultAddress, pendingAddress, onLog, onMessageReceived, onReply }: Props) {
+export default function SubscriberView({ connected, defaultAddress, activeProfile, pendingAddress, onLog, onMessageReceived, onReply }: Props) {
   const [picker,       setPicker]       = useState(defaultAddress);
   /** JMS-style broker-side selector, e.g. `priority > 5 AND type = 'order'`.
    *  Empty = no filter. Sent to start_subscriber as the `selector` arg.
@@ -138,8 +161,26 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
    *  filtered. */
   const [selector,     setSelector]     = useState("");
   const [showSelector, setShowSelector] = useState(false);
+  /** Topic-pattern wildcard (e.g. `orders.*`, `events.>`). Attached as
+   *  `apache.org:legacy-amqp-topic-binding:string` source filter. Lets users
+   *  subscribe to wildcards on brokers that don't honour pattern-in-address
+   *  (Solace topic hierarchies, Qpid Broker-J), and works alongside the JMS
+   *  selector — both filters apply if both are set. */
+  const [topicPattern, setTopicPattern] = useState("");
+  const [showTopicPattern, setShowTopicPattern] = useState(false);
   const [paused,       setPaused]       = useState(false);
   const [messages,     setMessages]     = useState<ReceivedMessage[]>([]);
+  /** Recording mode — when on, each received message is captured to an
+   *  in-memory buffer along with its arrival timestamp. Save flushes the
+   *  buffer to `~/.amqpush/recordings/<name>.json` via the Tauri backend. */
+  const [recording,    setRecording]    = useState(false);
+  const [recordSaveOpen, setRecordSaveOpen] = useState(false);
+  const [recordSaveName, setRecordSaveName] = useState("");
+  /** Replay modal state. Open via the "Replay…" button in the top bar. */
+  const [replayOpen, setReplayOpen] = useState(false);
+  /** Captured messages while recording. Cleared on Stop / save. */
+  const recordBufferRef = useRef<Array<{ ts: number; msg: ReceivedMessage }>>([]);
+  const [recordCount, setRecordCount] = useState(0);
   const [confirmClearMsgs, setConfirmClearMsgs] = useState(false);
   const [filter,       setFilter]       = useState("");
   const [filterErr,    setFilterErr]    = useState(false);
@@ -302,6 +343,12 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
       recentTsRef.current.push(t);
 
       setMessages(prev => [...prev, e.payload]);
+      // Recording: capture wall-clock time so replay can reproduce gaps.
+      // We buffer in a ref (not state) to avoid re-rendering on every msg.
+      if (recording) {
+        recordBufferRef.current.push({ ts: Date.now(), msg: e.payload });
+        setRecordCount(recordBufferRef.current.length);
+      }
       setSessionBytes(b => b + e.payload.meta.body_size);
       maybeNotify();
       if (onMessageReceived) {
@@ -347,6 +394,42 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
   // so re-entering the view reflects what the backend actually has.
   useEffect(() => { if (connected) refreshSubscriberList(); }, [connected]);
 
+  /**
+   * Flush the in-memory recording buffer to a file via the backend. The
+   * file ends up in `~/.amqpush/recordings/<name>.json` and is immediately
+   * pickable in the Replay view. Buffer is cleared on success.
+   */
+  async function saveRecording(name: string): Promise<void> {
+    const buf = recordBufferRef.current;
+    if (buf.length === 0) { onLog("err", "Recording buffer is empty"); return; }
+    const startTs = buf[0].ts;
+    // Group by source queue — use the first observed one if mixed (rare).
+    const sourceQueue = buf[0].msg.queue || "";
+    const recMsgs = buf.map(({ ts, msg }) => ({
+      offset_ms: Math.max(0, ts - startTs),
+      body: msg.meta.body_text ?? msg.body ?? "",
+      content_type: msg.meta.content_type ?? null,
+      properties: msg.meta.application_properties ?? {},
+    }));
+    try {
+      await invoke("save_recording", {
+        recording: {
+          version: 1,
+          name: name.trim(),
+          source_queue: sourceQueue,
+          started_at_ms: startTs,
+          messages: recMsgs,
+        },
+      });
+      onLog("ok", `Saved recording '${name.trim()}' — ${recMsgs.length} messages`);
+      recordBufferRef.current = [];
+      setRecordCount(0);
+      setRecordSaveOpen(false);
+    } catch (e) {
+      onLog("err", `Save recording: ${e}`);
+    }
+  }
+
   async function addSubscription() {
     if (!connected)        { onLog("err", "Not connected to broker"); return; }
     const addr = picker.trim();
@@ -354,8 +437,21 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
     if (queues.some(q => q.queue === addr)) { onLog("err", `Already subscribed to '${addr}'`); return; }
     try {
       const sel = selector.trim();
-      await invoke("start_subscriber", { address: addr, selector: sel || null });
-      setQueues(prev => [...prev, { queue: addr, reconnecting: false, selector: sel || undefined }]);
+      const topic = topicPattern.trim();
+      await invoke("start_subscriber", {
+        address: addr,
+        selector: sel || null,
+        topicPattern: topic || null,
+      });
+      setQueues(prev => [...prev, {
+        queue: addr,
+        reconnecting: false,
+        selector: sel || undefined,
+        topicPattern: topic || undefined,
+      }]);
+      // Bump per-profile Recent queues MRU so subscribing once surfaces the
+      // queue in the picker dropdown next time.
+      recordRecentQueue(activeProfile ?? "", addr);
       if (sessionStart === null) {
         setSessionStart(Date.now());
         setSessionBytes(0);
@@ -436,7 +532,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
     ].join(",");
     const rows = messages.map(m => [
       csvEscape(m.id),
-      csvEscape(m.timestamp),
+      csvEscape(fmtTimestamp(m.timestamp)),
       csvEscape(m.queue),
       csvEscape(m.meta.message_id ?? ""),
       csvEscape(m.meta.correlation_id ?? ""),
@@ -482,9 +578,13 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
     return compiledRules.find(r => r.regex.test(hay)) ?? null;
   }
 
-  const filtered = filter && !filterErr
+  // Newest-first display order. The underlying `messages` array stays in
+  // chronological order (so persistence, CSV export, and the "previous to
+  // same queue" diff still work) — we only reverse for the rendered list.
+  const filtered = (filter && !filterErr
     ? messages.filter(m => matchesFilter(m, filter))
-    : messages;
+    : messages
+  ).slice().reverse();
   const isFiltering = filter.trim().length > 0 && !filterErr;
   const selected = selectedId ? messages.find(m => m.id === selectedId) ?? null : null;
   const refMsg   = refId      ? messages.find(m => m.id === refId)      ?? null : null;
@@ -507,7 +607,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
       {/* ─── TITLE ROW ─── */}
       <ViewTopBar
         icon={<Inbox className="w-3.5 h-3.5" />}
-        title="Receive message"
+        title="Receive Messages"
       >
         {listening && (
           <button
@@ -532,6 +632,14 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
           {listening ? <><Plus className="w-3.5 h-3.5" /> Add</> : <><Play className="w-3.5 h-3.5" /> Start</>}
         </button>
 
+        <button
+          onClick={() => setReplayOpen(true)}
+          disabled={!connected}
+          className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12px] font-medium border border-t-line text-t-ink2 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40"
+          title={connected ? "Pick a saved recording and replay it to a queue" : "Connect to broker first"}
+        >
+          <Play className="w-3 h-3" /> Replay…
+        </button>
         {listening && (
           <button
             onClick={stopAll}
@@ -545,8 +653,8 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
 
       {/* ─── QUEUE PICKER ROW ─── */}
       <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel flex items-center gap-2">
-        <SectionLabel className="shrink-0">From</SectionLabel>
-        <QueuePicker value={picker} onChange={setPicker} connected={connected} disabled={false} showSave className="flex-1" />
+        <SectionLabel className="shrink-0 w-12">From</SectionLabel>
+        <QueuePicker value={picker} onChange={setPicker} connected={connected} profileName={activeProfile} disabled={false} showSave className="flex-1" />
         <button
           type="button"
           onClick={() => setShowSelector(s => !s)}
@@ -563,12 +671,28 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
           Selector
           {selector.trim() && <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />}
         </button>
+        <button
+          type="button"
+          onClick={() => setShowTopicPattern(s => !s)}
+          className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium border transition-colors ${
+            topicPattern.trim()
+              ? "border-violet-500/40 text-violet-500 bg-violet-500/10 hover:bg-violet-500/20"
+              : showTopicPattern
+                ? "border-t-line2 text-t-ink bg-t-card"
+                : "border-t-line text-t-ink4 hover:text-t-ink hover:bg-t-hover"
+          }`}
+          title={topicPattern.trim() ? `Pattern active: ${topicPattern}` : "Subscribe to a topic pattern with wildcards"}
+        >
+          <Hash className="w-3 h-3" />
+          Pattern
+          {topicPattern.trim() && <span className="w-1.5 h-1.5 rounded-full bg-violet-500" />}
+        </button>
       </div>
 
       {/* ─── SELECTOR INPUT ROW (collapsible) ─── */}
       {showSelector && (
         <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel/60 flex items-start gap-2">
-          <SectionLabel className="shrink-0 mt-1.5">Where</SectionLabel>
+          <SectionLabel className="shrink-0 mt-1.5 w-12">Where</SectionLabel>
           <div className="flex-1 min-w-0">
             <input
               value={selector}
@@ -588,6 +712,37 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
               onClick={() => setSelector("")}
               className="shrink-0 mt-1 p-1 rounded text-t-ink4 hover:text-red-500 hover:bg-t-hover transition-colors"
               title="Clear selector"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ─── TOPIC-PATTERN INPUT ROW (collapsible) ─── */}
+      {showTopicPattern && (
+        <div className="shrink-0 px-3 py-1.5 border-b border-t-line bg-t-panel/60 flex items-start gap-2">
+          <SectionLabel className="shrink-0 mt-1.5 w-12">Topic</SectionLabel>
+          <div className="flex-1 min-w-0">
+            <input
+              value={topicPattern}
+              onChange={e => setTopicPattern(e.target.value)}
+              placeholder="orders.*  or  events.>  or  notifications.#"
+              spellCheck={false}
+              className="w-full font-mono text-[12px] bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-t-ink outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500/30 transition-all placeholder:text-t-ink5"
+            />
+            <p className="text-[10px] text-t-ink5 mt-1">
+              Wildcard pattern applied via <span className="font-mono">apache.org:legacy-amqp-topic-binding:string</span>.
+              Wildcard syntax is broker-specific — Artemis multicast: <span className="font-mono">*</span> (one word) / <span className="font-mono">#</span> (zero+ words).
+              Solace: <span className="font-mono">*</span> / <span className="font-mono">&gt;</span>. Works alongside Selector if both are set.
+            </p>
+          </div>
+          {topicPattern && (
+            <button
+              type="button"
+              onClick={() => setTopicPattern("")}
+              className="shrink-0 mt-1 p-1 rounded text-t-ink4 hover:text-red-500 hover:bg-t-hover transition-colors"
+              title="Clear pattern"
             >
               <X className="w-3 h-3" />
             </button>
@@ -631,7 +786,8 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
                   : q.reconnecting
                     ? `Reconnecting to '${q.queue}'…`
                     : `Listening on '${q.queue}'`) +
-                (q.selector ? ` · selector: ${q.selector}` : "");
+                (q.selector ? ` · selector: ${q.selector}` : "") +
+                (q.topicPattern ? ` · pattern: ${q.topicPattern}` : "");
               const dismiss = () => {
                 if (q.unrecoverable) {
                   // No backend to stop — already stopped. Just drop the
@@ -655,6 +811,9 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
                   {q.selector && (
                     <Filter className="w-2.5 h-2.5 text-blue-500" />
                   )}
+                  {q.topicPattern && (
+                    <Hash className="w-2.5 h-2.5 text-violet-500" />
+                  )}
                   <button
                     onClick={dismiss}
                     className={`${q.unrecoverable ? "" : "opacity-50 group-hover:opacity-100"} hover:text-red-500 transition-opacity`}
@@ -666,6 +825,36 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
               );
             })}
           </div>
+
+          {/* Record toggle — small "REC" button. While on, all incoming
+              messages are captured to an in-memory buffer; Save flushes to
+              `~/.amqpush/recordings/<name>.json`. Buffer is preserved when
+              recording is paused so you can review counts before saving. */}
+          <button
+            onClick={() => setRecording(r => !r)}
+            className={`shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium transition-colors ${
+              recording
+                ? "bg-red-500/10 border-red-500/40 text-red-500"
+                : "border-t-line text-t-ink4 hover:text-t-ink hover:bg-t-hover"
+            }`}
+            title={recording
+              ? `Recording — ${recordCount} messages captured. Click to pause.`
+              : recordCount > 0
+                ? `Resume recording (${recordCount} buffered)`
+                : "Start recording incoming messages for later replay"}
+          >
+            <Circle className={`w-2.5 h-2.5 ${recording ? "fill-red-500 text-red-500 animate-pulse" : ""}`} />
+            REC{recordCount > 0 && <span className="font-mono opacity-80">{recordCount}</span>}
+          </button>
+          {recordCount > 0 && !recording && (
+            <button
+              onClick={() => { setRecordSaveName(""); setRecordSaveOpen(true); }}
+              title="Save the buffered messages as a recording for later replay"
+              className="shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-md border border-blue-500/30 text-blue-500 text-[11px] font-medium hover:bg-blue-500/10 transition-colors"
+            >
+              <Save className="w-3 h-3" /> Save…
+            </button>
+          )}
 
           {/* Session stats */}
           <div className="ml-auto flex items-center gap-3 text-[11px] font-mono text-t-ink4 shrink-0">
@@ -826,6 +1015,15 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
             />
           ) : (
             <div className="flex-1 overflow-y-auto min-h-0">
+              {/* Column header row — mirrors the first line of every message
+                  card so the user sees what each column means. Stays pinned
+                  on scroll. Second line is heterogeneous chips (queue / type /
+                  size / priority / reply-to) so no labels are useful there. */}
+              <div className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1 bg-t-panel/95 backdrop-blur-sm border-b border-t-line text-[10px] uppercase tracking-wider text-t-ink4 select-none">
+                <span className="w-3 shrink-0" />
+                <span className="font-semibold flex-1">Message ID</span>
+                <span className="font-semibold shrink-0">Date-Time</span>
+              </div>
               {filtered.map(msg => {
                 const isSel = selectedId === msg.id;
                 const isRef = refId === msg.id;
@@ -852,7 +1050,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
                       }
                       <span className="text-t-ink2 font-mono truncate flex-1">{idShort}</span>
                       {isRef && <span className="text-[9px] uppercase tracking-wider text-blue-500 font-bold shrink-0">REF</span>}
-                      <span className="text-t-ink5 font-mono shrink-0">{msg.timestamp}</span>
+                      <span className="text-t-ink5 font-mono shrink-0">{fmtTimestamp(msg.timestamp)}</span>
                     </div>
                     <div className="flex items-center gap-2 text-[10px] pl-5">
                       {/* Queue chip — only show when multiple queues are subscribed */}
@@ -894,7 +1092,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
               <span className="text-[12px] text-t-ink font-mono truncate" title={selected.meta.message_id ?? ""}>
                 {selected.meta.message_id ?? "(no message-id)"}
               </span>
-              <span className="text-[11px] text-t-ink5 font-mono shrink-0">{selected.timestamp}</span>
+              <span className="text-[11px] text-t-ink5 font-mono shrink-0">{fmtTimestamp(selected.timestamp)}</span>
               <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/15 text-blue-500 font-mono shrink-0" title={`Queue: ${selected.queue}`}>
                 {selected.queue}
               </span>
@@ -917,7 +1115,7 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
                       refId === selected.id ? "text-blue-500 bg-blue-500/10" : "text-t-ink4 hover:text-t-ink hover:bg-t-hover"
                     }`}
                   >
-                    <GitCompare className="w-3 h-3" /> {refId === selected.id ? "Ref ✓" : "Mark ref"}
+                    <GitCompare className="w-3 h-3" /> {refId === selected.id ? "Ref ✓" : "Ref"}
                   </button>
                 )}
 
@@ -968,6 +1166,70 @@ export default function SubscriberView({ connected, defaultAddress, pendingAddre
           right={selected}
           onClose={() => setDiffOpen(false)}
         />
+      )}
+
+      {/* ─── REPLAY MODAL ─── */}
+      {replayOpen && (
+        <ReplayModal
+          connected={connected}
+          activeProfile={activeProfile}
+          onLog={onLog}
+          onClose={() => setReplayOpen(false)}
+        />
+      )}
+
+      {/* ─── SAVE RECORDING MODAL ─── */}
+      {recordSaveOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+          onClick={() => setRecordSaveOpen(false)}
+        >
+          <div onClick={e => e.stopPropagation()}
+            className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[440px] max-w-[90vw] flex flex-col overflow-hidden">
+            <div className="shrink-0 px-4 py-2.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+              <Save className="w-3.5 h-3.5 text-blue-500" />
+              <span className="text-[13px] font-semibold text-t-ink">Save recording</span>
+              <button onClick={() => setRecordSaveOpen(false)}
+                className="ml-auto p-1 rounded hover:bg-t-hover text-t-ink4 hover:text-t-ink">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-[13px] text-t-ink2">
+              <p>
+                Save the {recordCount} captured message{recordCount === 1 ? "" : "s"} as a
+                recording — replayable later from the History view.
+              </p>
+              <input
+                autoFocus
+                value={recordSaveName}
+                onChange={e => setRecordSaveName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && recordSaveName.trim()) saveRecording(recordSaveName);
+                  if (e.key === "Escape") setRecordSaveOpen(false);
+                }}
+                placeholder="recording name"
+                className="w-full bg-t-field border border-t-line2 rounded-md px-2.5 py-1.5 text-[12px] text-t-ink outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all"
+              />
+              <p className="text-[10px] text-t-ink5">
+                Stored as <span className="font-mono">~/.amqpush/recordings/{recordSaveName.trim() || "<name>"}.json</span>.
+                Existing files with the same name are overwritten.
+              </p>
+            </div>
+            <div className="shrink-0 px-3 py-2 border-t border-t-line bg-t-panel flex items-center justify-end gap-2">
+              <button onClick={() => setRecordSaveOpen(false)}
+                className="px-3 py-1 rounded-md text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors">
+                Cancel
+              </button>
+              <button
+                onClick={() => saveRecording(recordSaveName)}
+                disabled={!recordSaveName.trim()}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-blue-500 hover:bg-blue-600 text-white text-[11px] font-semibold transition-colors disabled:opacity-40"
+              >
+                <Save className="w-3 h-3" /> Save
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1306,7 +1568,7 @@ function DiffModal({ left, right, onClose }: { left: ReceivedMessage; right: Rec
             </div>
             <div className="flex items-center gap-2 mt-0.5 text-[10px] text-t-ink5 font-mono">
               <span>{left.queue}</span>
-              <span>{left.timestamp}</span>
+              <span>{fmtTimestamp(left.timestamp)}</span>
               <span>{fmtBytes(left.meta.body_size)}</span>
             </div>
           </div>
@@ -1317,7 +1579,7 @@ function DiffModal({ left, right, onClose }: { left: ReceivedMessage; right: Rec
             </div>
             <div className="flex items-center gap-2 mt-0.5 text-[10px] text-t-ink5 font-mono">
               <span>{right.queue}</span>
-              <span>{right.timestamp}</span>
+              <span>{fmtTimestamp(right.timestamp)}</span>
               <span>{fmtBytes(right.meta.body_size)}</span>
             </div>
           </div>
@@ -1395,6 +1657,221 @@ function DiffModal({ left, right, onClose }: { left: ReceivedMessage; right: Rec
             className="px-3 py-1 rounded-md bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-medium">
             Close
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface RecordingSummary {
+  name: string;
+  source_queue: string;
+  started_at_ms: number;
+  message_count: number;
+  bytes: number;
+}
+
+/**
+ * Replay modal. Two-pane: a recordings list on the left (loaded from the
+ * `~/.amqpush/recordings/` directory via `list_recordings`), and a target /
+ * speed picker on the right. Click Play and the backend walks the captured
+ * messages, calling `send_message` for each with delays scaled by the speed
+ * multiplier. Progress updates arrive via the `replay_progress` event.
+ *
+ * Source messages aren't modified; replay is a peek-and-republish pattern.
+ */
+function ReplayModal({ connected, activeProfile, onLog, onClose }: {
+  connected: boolean;
+  activeProfile?: string;
+  onLog: (kind: "info" | "ok" | "err", text: string) => void;
+  onClose: () => void;
+}) {
+  const [items, setItems] = useState<RecordingSummary[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [target, setTarget] = useState("");
+  const [speed, setSpeed] = useState("1");
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState<{ step: number; total: number } | null>(null);
+
+  async function refresh() {
+    try {
+      const list = await invoke<RecordingSummary[]>("list_recordings");
+      setItems(list);
+      if (!selected && list.length > 0) setSelected(list[0].name);
+    } catch (e) {
+      onLog("err", `List recordings: ${e}`);
+    }
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    if (!selected) return;
+    const hit = items.find(r => r.name === selected);
+    if (hit && !target) setTarget(hit.source_queue);
+  }, [selected, items]);
+
+  useEffect(() => {
+    if (!playing) return;
+    let unlisten: (() => void) | undefined;
+    listen<{ step: number; total: number; ok: boolean; error?: string }>("replay_progress", e => {
+      setProgress({ step: e.payload.step, total: e.payload.total });
+    }).then(u => { unlisten = u; });
+    return () => { unlisten?.(); };
+  }, [playing]);
+
+  async function play() {
+    if (!selected) return;
+    const t = target.trim();
+    if (!t) { onLog("err", "Target queue is required"); return; }
+    const sp = Math.max(0, Number(speed) || 1);
+    setPlaying(true);
+    setProgress({ step: 0, total: 0 });
+    try {
+      await invoke("play_recording", { name: selected, target: t, speed: sp });
+      onLog("ok", `Replayed '${selected}' → ${t}`);
+      setProgress(null);
+      setPlaying(false);
+    } catch (e) {
+      onLog("err", `Replay failed: ${e}`);
+      setPlaying(false);
+      setProgress(null);
+    }
+  }
+
+  async function deleteSelected() {
+    if (!selected) return;
+    try {
+      await invoke("delete_recording", { name: selected });
+      onLog("info", `Deleted recording '${selected}'`);
+      setSelected(null);
+      await refresh();
+    } catch (e) {
+      onLog("err", `Delete recording: ${e}`);
+    }
+  }
+
+  const sel = items.find(r => r.name === selected) || null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}
+        className="bg-t-bg border border-t-line rounded-lg shadow-2xl w-[760px] max-w-[95vw] h-[480px] flex flex-col overflow-hidden">
+
+        <div className="shrink-0 px-4 py-2.5 border-b border-t-line bg-t-panel flex items-center gap-2">
+          <Play className="w-3.5 h-3.5 text-blue-500" />
+          <span className="text-[13px] font-semibold text-t-ink">Replay recording</span>
+          <span className="text-[11px] text-t-ink5 font-mono">{items.length}</span>
+          <button onClick={onClose} className="ml-auto p-1 rounded hover:bg-t-hover text-t-ink4 hover:text-t-ink">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="flex-1 flex min-h-0 overflow-hidden">
+          <div className="w-[45%] border-r border-t-line overflow-y-auto">
+            {items.length === 0 ? (
+              <EmptyState
+                icon={<Database className="w-8 h-8" />}
+                title="No recordings yet"
+                subtitle="Start a subscription, click REC, then Save…"
+              />
+            ) : items.map(r => {
+              const isSel = selected === r.name;
+              return (
+                <button key={r.name} onClick={() => setSelected(r.name)}
+                  className={`w-full text-left px-3 py-2 border-b border-t-line/40 transition-colors ${
+                    isSel ? "bg-blue-500/10" : "hover:bg-t-hover/50"
+                  }`}>
+                  <div className="text-[12px] font-medium text-t-ink truncate">{r.name}</div>
+                  <div className="flex items-center gap-2 text-[10px] text-t-ink5 font-mono mt-0.5">
+                    <span>{r.message_count} msg</span>
+                    <span>·</span>
+                    <span>{fmtBytes(r.bytes)}</span>
+                    {r.source_queue && <><span>·</span><span className="truncate">{r.source_queue}</span></>}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+            {sel ? (
+              <div className="flex-1 overflow-auto px-4 py-3 space-y-3">
+                <div>
+                  <div className="text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1">Recording</div>
+                  <div className="text-[13px] text-t-ink font-mono truncate">{sel.name}</div>
+                  <div className="text-[11px] text-t-ink5 mt-0.5">
+                    {sel.message_count} message{sel.message_count === 1 ? "" : "s"} · {fmtBytes(sel.bytes)}
+                    {sel.source_queue && <> · captured from <span className="font-mono text-t-ink4">{sel.source_queue}</span></>}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1">Target queue</label>
+                  <QueuePicker value={target} onChange={setTarget} connected={connected} profileName={activeProfile} />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold text-t-ink4 uppercase tracking-wider mb-1">
+                    Speed
+                    <span className="text-t-ink5 normal-case font-normal"> — 1 = real-time, 0 = max speed (no delays)</span>
+                  </label>
+                  <div className="flex items-center gap-1">
+                    {["0.5", "1", "2", "5", "0"].map(s => (
+                      <button key={s} type="button"
+                        onClick={() => setSpeed(s)}
+                        className={`px-2 py-1 rounded text-[11px] font-mono transition-colors ${
+                          speed === s ? "bg-blue-500/15 text-blue-500" : "text-t-ink4 hover:text-t-ink2 hover:bg-t-hover"
+                        }`}>
+                        {s === "0" ? "max" : `${s}×`}
+                      </button>
+                    ))}
+                    <input type="number" min="0" step="0.1" value={speed}
+                      onChange={e => setSpeed(e.target.value)}
+                      className="w-20 bg-t-field border border-t-line2 rounded px-2 py-0.5 text-[11px] text-t-ink outline-none focus:border-blue-500 ml-auto" />
+                  </div>
+                </div>
+
+                {progress && (
+                  <div>
+                    <div className="text-[10px] text-t-ink5 font-mono mb-1">
+                      {progress.step} / {progress.total}
+                    </div>
+                    <div className="h-1 bg-t-card rounded overflow-hidden">
+                      <div className="h-full bg-blue-500 transition-all"
+                        style={{ width: progress.total > 0 ? `${(progress.step / progress.total) * 100}%` : "0%" }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-[12px] text-t-ink5">
+                Pick a recording to configure replay
+              </div>
+            )}
+
+            <div className="shrink-0 px-3 py-2 border-t border-t-line bg-t-panel flex items-center gap-2">
+              {sel && (
+                <button onClick={deleteSelected} disabled={playing}
+                  title="Delete this recording from disk"
+                  className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium text-t-ink4 hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40">
+                  <Trash2 className="w-3 h-3" /> Delete
+                </button>
+              )}
+              <button onClick={onClose} disabled={playing}
+                className="ml-auto px-3 py-1 rounded-md text-[11px] font-medium text-t-ink4 hover:text-t-ink hover:bg-t-hover transition-colors disabled:opacity-40">
+                Close
+              </button>
+              <button onClick={play}
+                disabled={!sel || playing || !target.trim() || !connected}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-md bg-blue-500 hover:bg-blue-600 text-white text-[11px] font-semibold transition-colors disabled:opacity-40">
+                {playing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                {playing ? "Replaying…" : "Play"}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

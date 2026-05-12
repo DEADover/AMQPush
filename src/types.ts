@@ -24,6 +24,24 @@ export interface Profile {
   reconnect_base_ms?: number;
   reconnect_max_ms?: number;
   reconnect_multiplier?: number;
+
+  /** mTLS client certificate (optional). PEM `.crt` or PKCS#12 `.p12` /
+   *  `.pfx`. Empty string = no client cert. */
+  client_cert_path?: string;
+  /** PEM `.key` path — required when `client_cert_path` is a PEM cert.
+   *  Ignored when `client_cert_path` is a PKCS#12 bundle. */
+  client_key_path?: string;
+  /** Passphrase to decrypt the PKCS#12 bundle. Ignored for PEM keys (PEM
+   *  must be unencrypted PKCS#8 to load via native-tls — convert with
+   *  `openssl pkcs8 -topk8 -nocrypt -in encrypted.key -out plain.key`,
+   *  or repackage cert+key as a `.p12` if you need passphrase protection). */
+  client_key_passphrase?: string;
+
+  /** When true, AMQP is tunnelled over WebSocket (ws:// + use_tls=false,
+   *  wss:// + use_tls=true). Useful behind firewalls that block 5671/5672. */
+  use_ws?: boolean;
+  /** WebSocket URL path component, without leading slash. Empty = root. */
+  ws_path?: string;
 }
 
 export interface SendResult {

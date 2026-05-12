@@ -44,26 +44,48 @@ fn is_unrecoverable_amqp_error(err: &str) -> bool {
     false
 }
 
-/// Build the AMQP 1.0 filter set carrying a JMS-style selector. The descriptor
-/// `apache.org:selector-filter:string` is the de-facto standard understood by
-/// Artemis, ActiveMQ Classic, and Qpid; the value is the selector text
-/// (e.g. `priority > 5 AND type = 'order'`). Returns `None` for an empty /
-/// whitespace-only selector so callers can keep the no-selector code path
-/// untouched.
-fn selector_filter(selector: &str) -> Option<FilterSet> {
-    let s = selector.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let mut fs = FilterSet::new();
-    let descriptor_name = Symbol::from("apache.org:selector-filter:string");
+/// Insert one descriptor → string filter entry into a FilterSet. Used both
+/// for JMS selectors and for topic-pattern bindings; both descriptors take
+/// a single-string value, only the descriptor name differs.
+fn insert_string_filter(fs: &mut FilterSet, descriptor: &str, value: &str) {
+    let descriptor_name = Symbol::from(descriptor);
     fs.insert(
         descriptor_name.clone(),
         Value::Described(Box::new(Described {
             descriptor: Descriptor::Name(descriptor_name),
-            value: Value::String(s.to_string()),
+            value: Value::String(value.to_string()),
         })),
     );
+}
+
+/// Build the AMQP 1.0 filter set for a subscriber from the user-supplied
+/// optional selector + optional topic pattern. Both filters can be present
+/// simultaneously — selector narrows by message properties (`priority > 5`),
+/// topic pattern narrows by routing key / topic name (`orders.*.created`).
+///
+/// Descriptors:
+///   - `apache.org:selector-filter:string` — JMS selector (Artemis, ActiveMQ
+///     Classic, Qpid).
+///   - `apache.org:legacy-amqp-topic-binding:string` — topic pattern with
+///     the broker's native wildcard syntax. Honored by Qpid Broker-J,
+///     ActiveMQ Classic, and Artemis multicast addresses; ignored gracefully
+///     by brokers that don't recognise it (the attach still succeeds).
+///
+/// Returns `None` when both inputs are empty so callers keep the simple
+/// no-filter `Receiver::attach(...)` path.
+fn build_filters(selector: &str, topic_pattern: &str) -> Option<FilterSet> {
+    let sel = selector.trim();
+    let topic = topic_pattern.trim();
+    if sel.is_empty() && topic.is_empty() {
+        return None;
+    }
+    let mut fs = FilterSet::new();
+    if !sel.is_empty() {
+        insert_string_filter(&mut fs, "apache.org:selector-filter:string", sel);
+    }
+    if !topic.is_empty() {
+        insert_string_filter(&mut fs, "apache.org:legacy-amqp-topic-binding:string", topic);
+    }
     Some(fs)
 }
 
@@ -113,9 +135,17 @@ struct SubParams {
     password: String,
     use_tls: bool,
     tls_skip_verify: bool,
+    /// Optional mTLS client identity, propagated from the main `AmqpClient`.
+    client_cert: crate::amqp::ClientCert,
+    /// Transport choice (plain TCP vs WebSocket).
+    transport: crate::amqp::TransportOpts,
     /// JMS-style selector (e.g. `priority > 5`). Empty / whitespace = no filter,
     /// receiver attaches with no source filter (broker delivers everything).
     selector: String,
+    /// Optional topic-pattern wildcard (e.g. `orders.*` for Artemis multicast,
+    /// `events.>` for Solace). Attached as `apache.org:legacy-amqp-topic-binding`
+    /// source filter. Empty = no topic filter.
+    topic_pattern: String,
     /// Reconnect-backoff tuning: starting delay, ceiling, multiplier per step.
     /// Defaults if zero / negative pass-through preserve old behaviour.
     backoff_base_ms: u64,
@@ -128,6 +158,7 @@ async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connect
         &p.host, p.port, &p.username, &p.password,
         p.use_tls, p.tls_skip_verify,
         "amqpush-sub", false, 0,
+        &p.client_cert, &p.transport,
     )
     .await
     .map_err(|e| format!("Subscriber connection failed: {e}"))?;
@@ -144,7 +175,7 @@ async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connect
     // we can attach the JMS selector filter; otherwise fall back to the simple
     // attach (kept for backward parity — no behavioural change for users who
     // never set a selector).
-    let receiver = match selector_filter(&p.selector) {
+    let receiver = match build_filters(&p.selector, &p.topic_pattern) {
         Some(filter) => {
             let source = Source::builder()
                 .address(p.address.clone())
@@ -155,7 +186,7 @@ async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connect
                 .source(source)
                 .attach(&mut session)
                 .await
-                .map_err(|e| format!("Subscriber link failed (with selector): {e}"))?
+                .map_err(|e| format!("Subscriber link failed (with filter): {e}"))?
         }
         None => Receiver::attach(&mut session, link_name, &p.address)
             .await
@@ -165,6 +196,7 @@ async fn open_connection(p: &SubParams) -> Result<(Receiver, fe2o3_amqp::connect
     Ok((receiver, connection, session))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     host: &str,
     port: u16,
@@ -173,7 +205,10 @@ pub async fn start(
     password: &str,
     use_tls: bool,
     tls_skip_verify: bool,
+    client_cert: crate::amqp::ClientCert,
+    transport: crate::amqp::TransportOpts,
     selector: String,
+    topic_pattern: String,
     backoff_base_ms: u64,
     backoff_max_ms: u64,
     backoff_multiplier: f64,
@@ -187,7 +222,10 @@ pub async fn start(
         password: password.to_string(),
         use_tls,
         tls_skip_verify,
+        client_cert,
+        transport,
         selector,
+        topic_pattern,
         // Defensive defaults — if a caller passes 0 / negative / NaN we want
         // working values, not a no-op loop.
         backoff_base_ms: if backoff_base_ms == 0 { 1_000 } else { backoff_base_ms },
@@ -242,7 +280,7 @@ async fn run_loop(
                     "message_received",
                     ReceivedMessage {
                         id: Uuid::new_v4().to_string(),
-                        timestamp: Local::now().format("%H:%M:%S").to_string(),
+                        timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                         body,
                         is_truncated,
                         meta,

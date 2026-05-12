@@ -16,6 +16,8 @@ import ConfirmDialog from "./components/ConfirmDialog";
 import { useTheme } from "./hooks/useTheme";
 import { LogEntry, View, Profile } from "./types";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, dismissUpdate, UpdateInfo } from "./utils/updateCheck";
 import { Sparkles, Download as DownloadIcon } from "lucide-react";
@@ -143,6 +145,11 @@ export default function App() {
     reconnectBaseMs: "1000",
     reconnectMaxMs: "30000",
     reconnectMultiplier: "2",
+    clientCertPath: "",
+    clientKeyPath: "",
+    clientKeyPassphrase: "",
+    useWs: false,
+    wsPath: "",
   });
 
   // Track previous view to support Cmd+L toggle
@@ -267,6 +274,19 @@ export default function App() {
 
   useEffect(() => { loadProfiles(); }, []);
 
+  // Append the app version to the OS window title — auto-sourced from the
+  // Cargo / Tauri version so the title tracks releases without us hardcoding
+  // anything in `tauri.conf.json`. Runs once on mount; ignored on web preview
+  // where `getVersion()` rejects.
+  useEffect(() => {
+    (async () => {
+      try {
+        const v = await getVersion();
+        await getCurrentWindow().setTitle(`AMQPush ${v}`);
+      } catch { /* not in a Tauri window — Vite dev preview etc. */ }
+    })();
+  }, []);
+
   // Broker-latency polling. Runs while connected, hits ping_broker every
   // 5 s. Cheapest possible management RPC (broker.getName) — reuses the
   // long-lived ManagementChannel, so a healthy ping costs the broker
@@ -305,6 +325,11 @@ export default function App() {
       reconnectBaseMs:    p.reconnect_base_ms !== undefined ? String(p.reconnect_base_ms) : "1000",
       reconnectMaxMs:     p.reconnect_max_ms !== undefined ? String(p.reconnect_max_ms) : "30000",
       reconnectMultiplier: p.reconnect_multiplier !== undefined ? String(p.reconnect_multiplier) : "2",
+      clientCertPath:     p.client_cert_path ?? "",
+      clientKeyPath:      p.client_key_path ?? "",
+      clientKeyPassphrase: p.client_key_passphrase ?? "",
+      useWs:              p.use_ws ?? false,
+      wsPath:             p.ws_path ?? "",
     });
     setActiveProfile(p.name);
   }
@@ -353,6 +378,11 @@ export default function App() {
           reconnectBaseMs: target.reconnect_base_ms ?? 1000,
           reconnectMaxMs: target.reconnect_max_ms ?? 30000,
           reconnectMultiplier: target.reconnect_multiplier ?? 2,
+          clientCertPath: target.client_cert_path || null,
+          clientKeyPath: target.client_key_path || null,
+          clientKeyPassphrase: target.client_key_passphrase || null,
+          useWs: target.use_ws ?? false,
+          wsPath: target.ws_path || null,
         });
         handleConnected(target.queue);
         addLog("ok", `Auto-connected → ${target.host}:${target.port}${target.queue ? `  (${target.queue})` : ""}  via '${target.name}'`);
@@ -412,6 +442,7 @@ export default function App() {
     <SubscriberView
       connected={connected}
       defaultAddress={defaultAddress}
+      activeProfile={activeProfile}
       pendingAddress={pendingSubAddr}
       onLog={addLog}
       onMessageReceived={trackReceived}
@@ -640,7 +671,7 @@ export default function App() {
 
             {/* Browser */}
             <div className={view === "browser" ? "flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden" : "hidden"}>
-              <BrowserView connected={connected} visible={view === "browser"} onLog={addLog} onPublishTo={handlePublishTo} onSubscribeTo={handleSubscribeTo} />
+              <BrowserView connected={connected} visible={view === "browser"} onLog={addLog} onPublishTo={handlePublishTo} onSubscribeTo={handleSubscribeTo} profiles={profiles} activeProfile={activeProfile} />
             </div>
 
             {/* Inspector */}
