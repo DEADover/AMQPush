@@ -4,6 +4,62 @@ All notable changes to AMQPush are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-05-12
+
+### Highlights
+- **Cross-broker shovel** — the Browser peek pane has a new **Shovel…** action that copies the peeked (or selected) messages to a queue on any other saved profile. Source is the currently-active broker; target uses a transient connection that lives only for the run and doesn't disturb the user's primary session. Optional **JS transform** runs once per message before send (`ctx = { body, properties }`, `return false` to skip).
+- **Receive recording + replay** — a **REC** button on the active-subscription bar captures incoming messages into an in-memory buffer with their arrival timings. **Save…** flushes the buffer to `~/.amqpush/recordings/<name>.json`. The new **Replay…** modal picks any recording, target queue, and speed multiplier (`0.5× / 1× / 2× / 5× / max`), then walks the file replaying each message with delays scaled by the speed. Live progress + cancel.
+- **mTLS client certificates** — per-profile PEM `.crt` + `.key` or PKCS#12 `.p12` / `.pfx` bundle (with passphrase) for mutual TLS. **Browse** buttons open the native file picker (Finder / Explorer) with cert / key extension filters. Amber warning banner when TLS is off explains where to enable it. Plumbed through every connection path — main client, broker management, subscriber, peek, notification drainer.
+- **AMQP-over-WebSocket** — new transport via `fe2o3-amqp-ws`. Per-profile toggle in Connection → Security plus an optional WS URL path. Connects via `ws://host:port/<path>` (or `wss://` when TLS is on) instead of raw TCP. Picks up brokers behind corporate firewalls that block 5671/5672, plus cloud AMQP endpoints (Azure Service Bus, Amazon MQ RabbitMQ flavour, Tanzu RabbitMQ with `rabbitmq_web_amqp`).
+- **Topic-pattern subscribe** — `# Pattern` toggle next to Selector in Receive accepts wildcard expressions like `orders.*` or `events.>` and attaches them as `apache.org:legacy-amqp-topic-binding:string` source filters. Pattern + Selector can both be active at once; chips on the active-subscription bar show which filters are in play.
+- **DLQ bulk repair-resubmit with inline edit** — checkboxes appear on every peeked message (not just DLQ). The selection bar exposes per-broker actions (Shovel selected, Purge selected) plus DLQ-only actions (Edit & Requeue walkthrough, Requeue selected). The walkthrough modal lets the user tweak each message's body and override the target address before resubmit.
+
+### Added — Browser view
+- **Higher peek caps**: dropdown now goes up to 5000 plus an **All** option that resolves to the queue's broker-reported `message_count` (hard-capped at 50 000 to avoid catastrophic timeouts). Changing the cap re-peeks immediately — no manual Refresh required.
+- **Sticky column headers** — `#` / Message ID / Date-Time with the timestamp formatted as `YYYY-MM-DD HH:MM:SS` for cross-view correlation.
+- **Newest-first ordering** — rows sorted by AMQP `creation-time` descending; the `#N` column still reflects the original broker-delivery order.
+- **Selective purge** via Artemis's `queue.removeMessages(filter)` — builds a JMS selector matching the AMQP `message-id`s of the picked rows (`AMQUserID='a' OR AMQUserID='b' OR …`). Confirms with a count before executing.
+
+### Added — Receive view
+- **Sticky `Message ID / Date-Time` column header** — pinned to the top of the list. Date-Time is the same `YYYY-MM-DD HH:MM:SS` as Browser. Messages already in localStorage from before the format change are promoted to today's date so the column stays consistent mid-session.
+- **REC** and **Save…** chips on the active-subscription bar (see Highlights).
+- **Replay…** button in the top bar (see Highlights).
+
+### Added — Connection view
+- **mTLS client certificate** card in Advanced — Certificate / Private key paths with **Browse** buttons (native file picker) plus a Passphrase field for PKCS#12 bundles. Disabled with an amber warning when TLS is off.
+- **AMQP over WebSocket** toggle in Security plus a **WS path** sub-field that appears when WS is on. The Help-text hint reflects the current scheme (ws / wss) and path.
+- Native file picker enabled by adding `tauri-plugin-dialog` + `dialog:default` capability.
+
+### Added — Queue picker
+- **Recent queues MRU** — a per-profile list of the 10 most recently used queues (anything successfully sent to or subscribed from). Shown above the live broker queue list in the picker dropdown. Hover a row to reveal a × button that forgets that entry. Persisted in `localStorage` under `amqpush.recentQueues.<profile>`.
+
+### Added — Window / chrome
+- Window opens **maximised by default** (`tauri.conf.json` `maximized: true`). Min size 1080×780 still applies if the user un-maximises.
+- OS window title now reads `AMQPush <version>` — picked up at runtime via `getVersion()` so it tracks releases without hand-edits in config.
+- View titles renamed to **Send Messages**, **Receive Messages**, **Broker Clients** for parity with the sidebar.
+
+### Changed
+- Stats counts shipped per-message in Batch / CSV sends rather than once per batch — `sentCount`, size distribution, per-queue chart now reflect actual throughput instead of "one click".
+- Receive list now shows the newest message at the top (reversed render order; underlying array stays chronological for persistence + diff).
+- "Mark ref" button → "Ref" (one-line label).
+- `Clients` view title → `Broker Clients`; Help section title matches.
+- Workspace combobox replaced the native `<datalist>` (unreadable in WebKit). Workspaces can now be **deleted** with an inline confirm — all profiles in the deleted workspace move to `Default`.
+
+### Fixed
+- WebKit `<select>` rendered at the wrong height next to a sibling `<input>`. The Shovel modal's Profile / Queue pair now matches pixel-for-pixel via `appearance-none` + `h-8 box-border` + a custom `ChevronDown` caret.
+- Browser peek-list checkbox icon aligned with the first message-row line instead of the row's vertical centre.
+- Receive table previously had no column header — the message-row metadata was self-explanatory but the timestamp column was ambiguous between local-arrival and broker-creation time.
+- Help selectable via `select-text` on the modal panel so users can copy paths / token names directly out of the docs.
+
+### Backend
+- New direct deps: `fe2o3-amqp-ws = "0.14.0"` (WebSocket transport), `tauri-plugin-dialog = "2"` (native file picker for the mTLS Browse buttons), `@tauri-apps/plugin-dialog` (TS side).
+- New Rust types `amqp::ClientCert` and `amqp::TransportOpts` thread through `open_connection`, `AmqpClient::connect`, `ManagementChannel::open`, `broker::peek_messages`, `subscriber::start`, and `notif_drainer::start`. Eight call sites unified.
+- New Rust module `recordings.rs` — versioned JSON file format + load/save/delete/list helpers. Tauri commands: `list_recordings`, `get_recording`, `save_recording`, `delete_recording`, `play_recording` (live progress events).
+- New Tauri commands for the shovel: `shovel_open_target` / `shovel_send_to_target` / `shovel_close_target`. Transient client stored in `AppState::shovel_target`, separate from the user's primary connection.
+- New Tauri command `remove_messages_by_ids` calls Artemis `queue.removeMessages(filter)` with a JMS selector built from the picked rows' `message-id`s.
+- `start_subscriber` Tauri command takes the new `topic_pattern: Option<String>` arg; `Profile` schema gained `use_ws` / `ws_path` / `client_cert_path` / `client_key_path` / `client_key_passphrase`.
+- Tauri capability `default.json` expanded with `core:window:allow-set-title`, `core:app:allow-version`, `dialog:default`.
+
 ## [1.4.0] — 2026-05-12
 
 ### Highlights
@@ -320,6 +376,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Light / dark / system theme.
 - Logs view with persistent localStorage backing.
 
+[1.5.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.5.0
 [1.4.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.4.0
 [1.3.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.3.0
 [1.2.0]: https://github.com/DEADover/AMQPush/releases/tag/v1.2.0
